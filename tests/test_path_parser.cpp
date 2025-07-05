@@ -1,8 +1,10 @@
 #include "gtest/gtest.h"
 #include "redisjson++/path_parser.h"
 #include "redisjson++/exceptions.h"
+#include <nlohmann/json.hpp> // Make sure it's included for the using directive
 
 using namespace redisjson;
+using json = nlohmann::json; // Add this line
 
 TEST(PathParserTest, EmptyPath) {
     PathParser parser;
@@ -152,12 +154,12 @@ TEST(PathParserTest, NormalizePathInvalid) {
 TEST(PathParserTest, ExpandWildcardsNoWildcard) {
     PathParser parser;
     json doc = json::object(); // Dummy document
-    std::vector<PathParser::PathElement> parsed_path = parser.parse("key.subkey");
+    // std::vector<PathParser::PathElement> parsed_path = parser.parse("key.subkey"); // Not needed for public API test
     // Current placeholder throws if wildcards are present, or reconstructs.
     // If it reconstructs:
-    auto expanded = parser.expand_wildcards(doc, parsed_path);
-    ASSERT_EQ(expanded.size(), 1);
-    EXPECT_EQ(expanded[0], "key.subkey");
+    // auto expanded = parser.expand_wildcards(doc, parsed_path); // This calls a private method. Test via public API.
+    // ASSERT_EQ(expanded.size(), 1);
+    // EXPECT_EQ(expanded[0], "key.subkey");
 
     auto expanded_str = parser.expand_wildcards(doc, "key.subkey");
      ASSERT_EQ(expanded_str.size(), 1);
@@ -168,7 +170,7 @@ TEST(PathParserTest, ExpandWildcardsNoWildcard) {
 TEST(PathParserTest, ExpandWildcardsEmptyPath) {
     PathParser parser;
     json doc = json::object();
-    auto expanded = parser.expand_wildcards(doc, "");
+    auto expanded = parser.expand_wildcards(doc, ""); // This calls the public overload
     ASSERT_EQ(expanded.size(), 1);
     EXPECT_EQ(expanded[0], "");
 }
