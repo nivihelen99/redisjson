@@ -89,14 +89,7 @@ public:
 
     // Health Monitoring
     bool is_healthy() const; // Overall health of the pool / primary connection
-    ConnectionStats get_stats() const {
-        return {
-            stats_.total_connections.load(std::memory_order_relaxed),
-            stats_.active_connections.load(std::memory_order_relaxed),
-            stats_.idle_connections.load(std::memory_order_relaxed),
-            stats_.connection_errors.load(std::memory_order_relaxed)
-        };
-    }
+    ConnectionStats get_stats() const;
     void set_health_check_interval(std::chrono::seconds interval); // 0 to disable
 
     // Failover Support (Basic stubs, full failover is complex)
