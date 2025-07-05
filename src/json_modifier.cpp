@@ -357,11 +357,33 @@ size_t JSONModifier::get_size(const json& document,
     const json* element = path_elements.empty() ? &document : navigate_to_element_const(document, path_elements);
     // PathNotFoundException will be thrown by navigate if path is invalid
 
-    if (element->is_object() || element->is_array() || element->is_string()) {
-        return element->size();
+    switch (element->type()) {
+        case json::value_t::object:
+        case json::value_t::array:
+        case json::value_t::string:
+            return element->size(); // Correct for object (key count), array (element count), string (length)
+        case json::value_t::null:
+            return 0;
+        case json::value_t::number_integer:
+        case json::value_t::number_unsigned:
+        case json::value_t::number_float:
+        case json::value_t::boolean:
+            return 1; // Conventional size for scalar types
+        case json::value_t::binary:
+            // nlohmann::json binary type also has .size()
+            // It represents the number of bytes in the binary array.
+            return element->size();
+        case json::value_t::discarded:
+            // A discarded value should probably not have a size, or it's an error state.
+            // Throwing an exception or returning a specific error code might be appropriate.
+            // For now, let's consider its size 0 or throw, matching null or being more explicit.
+            // Let's throw for now, as it's an unusual state.
+            throw std::runtime_error("Cannot get size of a discarded JSON element at path: " + reconstruct_path_string(path_elements, path_elements.size() > 0 ? path_elements.size() -1 : 0));
+        default:
+            // This case should ideally not be reached if all nlohmann::json types are handled.
+            // Throwing an exception is safer than returning a potentially misleading size.
+            throw std::runtime_error("Unknown JSON element type encountered in get_size at path: " + reconstruct_path_string(path_elements, path_elements.size() > 0 ? path_elements.size() -1 : 0));
     }
-    if (element->is_null()) return 0; // Or throw, depending on desired semantics for size of null
-    return 1; // For boolean, number
 }
 
 
