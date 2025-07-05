@@ -103,6 +103,7 @@ json* JSONModifier::navigate_to_element(json& doc,
                 current = &(*current)[el.key_name];
                 break;
             case PathParser::PathElement::Type::INDEX:
+            {
                  if (!current->is_array()) {
                     if (create_missing_paths && (current->is_null() || i==0)) {
                         *current = json::array();
@@ -154,6 +155,7 @@ json* JSONModifier::navigate_to_element(json& doc,
                 }
                 current = &(*current)[actual_index];
                 break;
+            }
             default:
                 throw InvalidPathException("Unsupported path element type: " + path_element_to_string(el));
         }
