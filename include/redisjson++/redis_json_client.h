@@ -5,29 +5,30 @@
 #include <memory> // For std::unique_ptr
 #include <nlohmann/json.hpp>
 
-#include "redis_connection_manager.h"
-#include "path_parser.h"       // Assuming PathParser will be created
-#include "json_modifier.h"     // Assuming JSONModifier will be created
-#include "lua_script_manager.h"// Assuming LuaScriptManager will be created
+#include "common_types.h" // For ClientConfig and SetOptions
 #include "exceptions.h"
+// Forward declare classes managed by unique_ptr to reduce header dependencies if possible,
+// but full types are needed for std::unique_ptr unless custom deleters are used.
+// For now, assume full includes are necessary and managed carefully.
+#include "redis_connection_manager.h" // Needs full definition for std::unique_ptr
+#include "path_parser.h"              // Needs full definition for std::unique_ptr
+#include "json_modifier.h"            // Needs full definition for std::unique_ptr
+#include "lua_script_manager.h"       // Needs full definition for std::unique_ptr
+
 
 // Forward declaration for nlohmann::json for convenience
 using json = nlohmann::json;
 
 namespace redisjson {
 
-// Defined in requirement.md, might move to a common types header
-struct SetOptions {
-    bool create_path = true;        // Create intermediate paths (more relevant for set_path)
-    bool overwrite = true;          // Overwrite existing values
-    std::chrono::seconds ttl = std::chrono::seconds(0); // TTL (0 = no expiry)
-    // bool compress = false;          // Compress large JSON (future feature)
-    // bool validate_schema = false;   // Validate against schema (future feature)
-    // std::string schema_name = "";   // Schema name for validation (future feature)
-    // bool emit_events = true;        // Emit change events (future feature)
-    // int retry_count = 3;            // Number of retries on failure (client might handle this)
-};
-
+// Forward declare RedisConnectionManager, PathParser, JSONModifier, LuaScriptManager, RedisConnection
+// if their full definitions are not strictly needed in this header (e.g. if only pointers/references were used).
+// However, std::unique_ptr members generally require the full definition of the pointed-to type.
+class RedisConnectionManager;
+class PathParser;
+class JSONModifier;
+class LuaScriptManager;
+class RedisConnection; // For the return type of get_redis_connection()
 
 class RedisJSONClient {
 public:

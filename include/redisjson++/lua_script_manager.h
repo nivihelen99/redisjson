@@ -3,6 +3,7 @@
 #include "redis_connection_manager.h" // Needs access to RedisConnection or similar
 #include "exceptions.h"             // For LuaScriptException
 #include <nlohmann/json.hpp>
+#include <hiredis/hiredis.h> // Added for redisReply
 #include <string>
 #include <vector>
 #include <unordered_map>

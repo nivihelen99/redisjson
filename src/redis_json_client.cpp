@@ -56,12 +56,12 @@ void RedisJSONClient::set_json(const std::string& key, const json& document, con
 
     if (!reply || reply->type == REDIS_REPLY_ERROR) {
         connection_manager_->return_connection(std::move(conn)); // Return connection before throwing
-        throw RedisCommandException(key, "SET", reply ? reply->str : "No reply or connection error");
+        throw RedisCommandException("SET", "Key: " + key + ", Error: " + (reply ? (reply->str ? reply->str : "Reply object exists but str is null") : "No reply or connection error"));
     }
     // Check reply status for SET, should be "OK"
     if (reply->type == REDIS_REPLY_STATUS && strcmp(reply->str, "OK") != 0) {
         connection_manager_->return_connection(std::move(conn));
-        throw RedisCommandException(key, "SET", "SET command did not return OK: " + std::string(reply->str));
+        throw RedisCommandException("SET", "Key: " + key + ", SET command did not return OK: " + std::string(reply->str));
     }
 
     connection_manager_->return_connection(std::move(conn));
@@ -76,12 +76,12 @@ json RedisJSONClient::get_json(const std::string& key) const {
 
     if (!reply) { // Covers null reply from command() itself (e.g. connection broken before command sent)
         connection_manager_->return_connection(std::move(conn));
-        throw RedisCommandException(key, "GET", "No reply or connection error");
+        throw RedisCommandException("GET", "Key: " + key + ", Error: No reply or connection error");
     }
 
     if (reply->type == REDIS_REPLY_ERROR) {
         connection_manager_->return_connection(std::move(conn));
-        throw RedisCommandException(key, "GET", reply->str);
+        throw RedisCommandException("GET", "Key: " + key + ", Error: " + (reply->str ? reply->str : "Redis error reply with no message"));
     }
 
     if (reply->type == REDIS_REPLY_NIL) {
@@ -103,7 +103,10 @@ json RedisJSONClient::get_json(const std::string& key) const {
 
     // Should not reach here with a valid Redis GET reply structure
     connection_manager_->return_connection(std::move(conn));
-    throw RedisCommandException(key, "GET", "Unexpected reply type: " + std::to_string(reply->type));
+    // This path indicates a logic error or unexpected server behavior.
+    // Return a default-constructed json or throw a more specific internal error.
+    // For now, let's throw, consistent with other error handling.
+    throw RedisCommandException("GET", "Key: " + key + ", Error: Unexpected reply type from Redis: " + std::to_string(reply ? reply->type : -1));
 }
 
 bool RedisJSONClient::exists_json(const std::string& key) const {
@@ -115,7 +118,7 @@ bool RedisJSONClient::exists_json(const std::string& key) const {
 
     if (!reply || reply->type == REDIS_REPLY_ERROR) {
         connection_manager_->return_connection(std::move(conn));
-        throw RedisCommandException(key, "EXISTS", reply ? reply->str : "No reply or connection error");
+        throw RedisCommandException("EXISTS", "Key: " + key + ", Error: " + (reply ? (reply->str ? reply->str : "Reply object exists but str is null") : "No reply or connection error"));
     }
 
     connection_manager_->return_connection(std::move(conn));
@@ -131,7 +134,7 @@ void RedisJSONClient::del_json(const std::string& key) {
 
     if (!reply || reply->type == REDIS_REPLY_ERROR) {
         connection_manager_->return_connection(std::move(conn));
-        throw RedisCommandException(key, "DEL", reply ? reply->str : "No reply or connection error");
+        throw RedisCommandException("DEL", "Key: " + key + ", Error: " + (reply ? (reply->str ? reply->str : "Reply object exists but str is null") : "No reply or connection error"));
     }
     // DEL returns number of keys deleted. We don't strictly need to check it for success
     // unless we want to confirm it was > 0 for an "effective" delete.

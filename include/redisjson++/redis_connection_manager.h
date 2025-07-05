@@ -1,6 +1,6 @@
 #pragma once
 
-#include "redis_json_client.h" // For ClientConfig (though could be moved to a common types header)
+#include "common_types.h" // For ClientConfig
 #include "exceptions.h"      // For ConnectionException
 #include <hiredis/hiredis.h>
 #include <string>
@@ -81,7 +81,7 @@ public:
 
     // Health Monitoring
     bool is_healthy() const; // Overall health of the pool / primary connection
-    ConnectionStats get_stats() const;
+    const ConnectionStats& get_stats() const; // Return by const reference
     void set_health_check_interval(std::chrono::seconds interval); // 0 to disable
 
     // Failover Support (Basic stubs, full failover is complex)

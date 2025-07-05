@@ -5,6 +5,7 @@
 #include <nlohmann/json.hpp>
 #include <string>
 #include <vector>
+#include <variant> // Added for std::variant
 
 using json = nlohmann::json;
 

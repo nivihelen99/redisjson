@@ -1,5 +1,6 @@
 #include "redisjson++/json_modifier.h"
 #include <algorithm> // For std::find_if if used with filters
+#include <variant>   // Added for std::variant related functions like std::holds_alternative, std::get
 
 namespace redisjson {
 
@@ -415,7 +416,8 @@ json JSONModifier::array_pop(json& document, const std::vector<PathParser::PathE
         throw TypeMismatchException(reconstruct_path_string(path_elements, path_elements.size()-1), "array", arr_node->type_name());
     }
     if (arr_node->empty()) {
-        throw IndexOutOfBoundsException("Cannot pop from an empty array.", 0);
+        // Changed to use the string-only constructor for this specific message
+        throw IndexOutOfBoundsException("Cannot pop from an empty array.");
     }
 
     int actual_index = index;
