@@ -417,7 +417,7 @@ bool RedisConnectionManager::is_healthy() const {
     return primary_healthy_;
 }
 
-const redisjson::ConnectionStats& RedisConnectionManager::get_stats() const {
+redisjson::ConnectionStats RedisConnectionManager::get_stats() const {
     // Access to stats members should be atomic or protected if modified by multiple threads
     // (e.g. health checker). `std::atomic` is used, so direct return is fine.
     return stats_;
