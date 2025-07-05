@@ -10,30 +10,7 @@ class RedisJSONClientTest : public ::testing::Test {
 protected:
     redisjson::ClientConfig client_config;
     std::unique_ptr<redisjson::RedisJSONClient> client;
-    std::string test_prefix = "redisjson_test:client:";
-
-    void SetUp() override {
-        client_config.host = "127.0.0.1";
-        client_config.port = 6379;
-        client_config.password = "";
-        client_config.database = 0; // Use default DB for tests, ensure it's clean or prefixed
-        client_config.connection_pool_size = 3;
-        client_config.timeout = std::chrono::milliseconds(500);
-
-        if (!isRedisAvailable()) {
-            GTEST_SKIP() << "Redis server not available at " << client_config.host << ":" << client_config.port << ". Skipping all RedisJSONClient tests.";
-            return; // Skip further setup if Redis is not available
-        }
-
-        client = std::make_unique<redisjson::RedisJSONClient>(client_config);
-        cleanupTestKeys(); // Clean up keys from previous runs before each test
-    }
-
-    void TearDown() override {
-        if (client) { // Only cleanup if client was initialized (Redis was available)
-            cleanupTestKeys();
-        }
-    }
+    std::string test_prefix = "redisjson_test:client:"; // This prefix can be removed if FLUSHDB is used.
 
     // Helper to check Redis availability (copied from ConnectionManagerTest)
     bool isRedisAvailable() {
@@ -49,103 +26,25 @@ protected:
         return available;
     }
 
-    // Helper to clean up test keys
-    void cleanupTestKeys() {
-        if (!client) return; // Client might not be initialized if Redis was down
-        try {
-            std::unique_ptr<redisjson::RedisConnection> conn = client->get_redis_connection(); // Need direct access or a helper in client
-
-            // This is a bit of a hack, ideally RedisJSONClient would have a "keys_by_pattern"
-            // For now, using raw commands for cleanup.
-            std::string pattern = test_prefix + "*";
-            redisReply* reply_keys = conn->command("KEYS %s", pattern.c_str());
-            if (reply_keys && reply_keys->type == REDIS_REPLY_ARRAY) {
-                for (size_t i = 0; i < reply_keys->elements; ++i) {
-                    if (reply_keys->element[i]->type == REDIS_REPLY_STRING) {
-                        conn->command("DEL %s", reply_keys->element[i]->str);
-                    }
-                }
-            }
-            if(reply_keys) freeReplyObject(reply_keys);
-            // How to return connection if client->get_redis_connection() is used?
-            // For now, assume this connection is single-use for cleanup or client manages it.
-            // This needs RedisConnectionManager to be accessible or a specific cleanup method.
-            // Let's assume the connection is returned automatically when conn goes out of scope if get_redis_connection
-            // was from a pool that uses RAII for return.
-            // The current RedisJSONClient::get_redis_connection returns a unique_ptr that needs manual return.
-            // This cleanup function needs direct access to connection_manager for proper return.
-            // For simplicity in test, we'll leak this cleanup connection or rely on manager's dtor.
-            // This is not ideal. A better way: client should provide a way to execute raw commands or have a cleanup util.
-        } catch (const std::exception& e) {
-            // Ignore errors during cleanup, test will fail if setup fails.
-            // std::cerr << "Error during test key cleanup: " << e.what() << std::endl;
-        }
-    }
-
-
-    // Helper for direct Redis connection for cleanup (simplification)
+    // Helper for direct Redis connection (used for setup/teardown FLUSHDB)
     std::unique_ptr<redisjson::RedisConnection> getDirectConnectionForCleanup() {
+        // Ensure database is 0 for initial connection if SELECT is used,
+        // or rely on client_config.database for the actual test DB.
+        // For FLUSHDB, it usually applies to the currently selected DB.
         auto direct_conn = std::make_unique<redisjson::RedisConnection>(
             client_config.host, client_config.port, client_config.password,
-            client_config.database, client_config.timeout);
+            client_config.database, // Connect to the target test database directly
+            client_config.timeout);
         if (direct_conn->connect()) {
             return direct_conn;
         }
+        // Fallback to DB 0 if connection to specific DB failed and then select?
+        // No, if connect to test DB fails, it's an issue.
         return nullptr;
     }
 
-    // Revised cleanup using direct connection
-    void cleanupTestKeysRevised() {
-        std::unique_ptr<redisjson::RedisConnection> conn = getDirectConnectionForCleanup();
-        if (!conn) return;
-
-        std::string pattern = test_prefix + "*";
-        redisReply* reply_keys = conn->command("KEYS %s", pattern.c_str());
-
-        if (reply_keys && reply_keys->type == REDIS_REPLY_ARRAY) {
-            if (reply_keys->elements > 0) {
-                // Construct DEL command with multiple arguments
-                std::vector<const char*> argv;
-                argv.push_back("DEL");
-                std::vector<std::string> key_strings; // to keep c_str valid
-
-                for (size_t i = 0; i < reply_keys->elements; ++i) {
-                    if (reply_keys->element[i]->type == REDIS_REPLY_STRING) {
-                        key_strings.push_back(reply_keys->element[i]->str);
-                        argv.push_back(key_strings.back().c_str());
-                    }
-                }
-                if (argv.size() > 1) {
-                     redisReply* del_reply = conn->command_argv(argv.size(), argv.data(), NULL);
-                     if (del_reply) freeReplyObject(del_reply);
-                }
-            }
-        }
-        if(reply_keys) freeReplyObject(reply_keys);
-    }
-
-    // Override SetUp and TearDown to use revised cleanup
-    void SetUpRevised() {
-        client_config.host = "127.0.0.1";
-        client_config.port = 6379; // ... (rest of config)
-
-        if (!isRedisAvailable()) {
-            GTEST_SKIP() << "Redis server not available. Skipping all RedisJSONClient tests.";
-            return;
-        }
-        client = std::make_unique<redisjson::RedisJSONClient>(client_config);
-        cleanupTestKeysRevised();
-    }
-    void TearDownRevised() {
-        if (client) {
-             cleanupTestKeysRevised();
-        }
-    }
-    // To use these, the test fixture would need to call them, or inherit differently.
-    // For now, sticking to original SetUp/TearDown using the client's connection manager if possible,
-    // or accepting the cleanup limitation. The revised cleanup is better. I'll use it in SetUp/TearDown.
-    // Re-integrating revised cleanup:
-    void SetUp() override { // This overrides the ::Test::SetUp
+    // The active SetUp and TearDown using FLUSHDB on a dedicated test database (e.g., 15)
+    void SetUp() override {
         client_config.host = "127.0.0.1";
         client_config.port = 6379;
         client_config.password = "";
