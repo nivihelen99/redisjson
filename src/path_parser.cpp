@@ -156,7 +156,7 @@ std::vector<std::string> PathParser::expand_wildcards(const json& document,
     bool has_wildcard = false;
     for(const auto& el : parsed_path) {
         if (el.type == PathElement::Type::WILDCARD ||
-            el.type == PathElement::Type::RECURSIVE_DESCENT ||
+            el.type == PathElement::Type::RECURSIVE ||
             el.type == PathElement::Type::FILTER) {
             has_wildcard = true;
             break;
