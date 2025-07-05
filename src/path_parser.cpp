@@ -1,11 +1,14 @@
 #include "redisjson++/path_parser.h"
 #include "redisjson++/exceptions.h" // For InvalidPathException
+#include <nlohmann/json.hpp> // Added for json type
 #include <iostream> // For temporary debugging
 #include <algorithm>
 #include <stdexcept> // For std::invalid_argument, std::out_of_range
 #include <optional> // Required for PathElement slice members
 
 namespace redisjson {
+
+using json = nlohmann::json; // Added using directive
 
 // Basic helper to trim whitespace
 static std::string trim(const std::string& str) {
@@ -44,7 +47,8 @@ std::vector<PathParser::PathElement> PathParser::parse(const std::string& path_s
 
         if (c == '.') {
             if (!current_segment.empty()) {
-                PathElement elem(PathElement::Type::KEY);
+                PathElement elem;
+                elem.type = PathElement::Type::KEY;
                 elem.key_name = current_segment;
                 elements.push_back(elem);
                 current_segment.clear();
@@ -55,7 +59,8 @@ std::vector<PathParser::PathElement> PathParser::parse(const std::string& path_s
             }
         } else if (c == '[') {
             if (!current_segment.empty()) {
-                PathElement elem(PathElement::Type::KEY);
+                PathElement elem;
+                elem.type = PathElement::Type::KEY;
                 elem.key_name = current_segment;
                 elements.push_back(elem);
                 current_segment.clear();
@@ -80,7 +85,8 @@ std::vector<PathParser::PathElement> PathParser::parse(const std::string& path_s
                 if (bracket_content.length() < 2) {
                      throw InvalidPathException("Invalid quoted key in brackets.");
                 }
-                PathElement elem(PathElement::Type::KEY);
+                PathElement elem;
+                elem.type = PathElement::Type::KEY;
                 elem.key_name = bracket_content.substr(1, bracket_content.length() - 2);
                 if (elem.key_name.empty() && bracket_content.length() == 2) {
                     throw InvalidPathException("Empty quoted key name in path is not allowed.");
@@ -94,9 +100,10 @@ std::vector<PathParser::PathElement> PathParser::parse(const std::string& path_s
                     if (chars_processed != bracket_content.length()) {
                          throw InvalidPathException("Invalid characters in array index: " + bracket_content);
                     }
-                    PathElement elem(PathElement::Type::INDEX);
+                    PathElement elem;
+                    elem.type = PathElement::Type::INDEX;
                     elem.index = index_val;
-                    elem.is_array_element = true;
+                    elem.is_array_element = true; // This member name is now correct
                     elements.push_back(elem);
                 } catch (const std::invalid_argument& e) {
                     throw InvalidPathException("Invalid array index (not a number): " + bracket_content);
@@ -114,7 +121,8 @@ std::vector<PathParser::PathElement> PathParser::parse(const std::string& path_s
     }
 
     if (!current_segment.empty()) {
-        PathElement elem(PathElement::Type::KEY);
+        PathElement elem;
+        elem.type = PathElement::Type::KEY;
         elem.key_name = current_segment;
         elements.push_back(elem);
     } else if (!path_str.empty() && (path_str.back() == '.')) {

@@ -250,10 +250,10 @@ std::unique_ptr<RedisConnection> RedisConnectionManager::get_connection() {
         }
 
         // Wait if pool is empty and we can't create more connections or are shutting down
-        condition_.wait(lock, [this] {
+        condition_.wait(lock, [this] { // Added [this] capture
             return shutting_down_ ||
                    !available_connections_.empty() ||
-                   ((stats_.active_connections + pool_.size()) < static_cast<size_t>(config_.connection_pool_size));
+                   ((stats_.active_connections + pool_.size()) < static_cast<size_t>(this->config_.connection_pool_size)); // Used this->config_
         });
 
         if (shutting_down_) { // Check again after wait
