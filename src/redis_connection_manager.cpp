@@ -2,6 +2,7 @@
 #include <stdexcept> // For runtime_error
 #include <vector>    // For command_argv
 #include <cstdarg>   // For va_list, va_start, va_end
+#include <cstring>   // For strcmp
 
 namespace redisjson {
 
@@ -416,7 +417,7 @@ bool RedisConnectionManager::is_healthy() const {
     return primary_healthy_;
 }
 
-ConnectionStats RedisConnectionManager::get_stats() const {
+const redisjson::ConnectionStats& RedisConnectionManager::get_stats() const {
     // Access to stats members should be atomic or protected if modified by multiple threads
     // (e.g. health checker). `std::atomic` is used, so direct return is fine.
     return stats_;
