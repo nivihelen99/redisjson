@@ -242,56 +242,156 @@ std::unique_ptr<RedisConnection> RedisConnectionManager::create_new_connection(c
 
 
 std::unique_ptr<RedisConnection> RedisConnectionManager::get_connection() {
-    // Simplified: Always create a new connection. Pooling for reuse is bypassed for now.
-    // Proper pooling with unique_ptr ownership requires careful handling (e.g. custom deleters
-    // or revising how available_connections_ and pool_ interact with unique_ptr).
-    if (shutting_down_) {
-        throw ConnectionException("Connection manager is shutting down.");
-    }
+    std::unique_lock<std::mutex> lock(pool_mutex_);
 
-    auto conn = create_new_connection(config_.host, config_.port);
-    if (!conn->is_connected()) {
-        stats_.connection_errors++;
-        throw ConnectionException("Failed to create new connection for get_connection. Host: " + config_.host + ":" + std::to_string(config_.port));
-    }
+    while (true) { // Loop to retry if a pooled connection is bad or other transient issues.
+        if (shutting_down_) {
+            throw ConnectionException("Connection manager is shutting down.");
+        }
 
-    // Increment active connections, assuming this new one is active.
-    // Total connections might also be tracked if we want to limit overall connections.
-    // For now, this bypasses detailed pool stat tracking.
-    stats_.active_connections++;
-    // stats_.total_connections++; // If we track total live connections including those not in "pool_"
+        // Wait if pool is empty and we can't create more connections or are shutting down
+        condition_.wait(lock, [this] {
+            return shutting_down_ ||
+                   !available_connections_.empty() ||
+                   ((stats_.active_connections + pool_.size()) < static_cast<size_t>(config_.connection_pool_size));
+        });
 
-    return conn; // Ownership is transferred to the caller.
+        if (shutting_down_) { // Check again after wait
+            throw ConnectionException("Connection manager is shutting down while waiting for a connection.");
+        }
+
+        std::unique_ptr<RedisConnection> conn_to_return;
+
+        if (!available_connections_.empty()) {
+            RedisConnection* raw_conn = available_connections_.front();
+            available_connections_.pop();
+            stats_.idle_connections--;
+
+            auto it = std::find_if(pool_.begin(), pool_.end(),
+                                   [&](const std::unique_ptr<RedisConnection>& p) { return p.get() == raw_conn; });
+
+            if (it != pool_.end()) {
+                conn_to_return = std::move(*it); // Transfer ownership from pool_
+                pool_.erase(it); // Remove the (now empty) unique_ptr from pool_
+            } else {
+                // Should not happen if available_connections_ is consistent with pool_.
+                // If it does, log an error, restore idle_connections_ count and retry.
+                stats_.idle_connections++; // Correct the optimistic decrement.
+                // Optionally log: "Connection from available queue not found in main pool. Retrying."
+                continue; // Retry getting a connection.
+            }
+
+            // Health check for retrieved idle connection
+            bool healthy = true;
+            if (std::chrono::steady_clock::now() - conn_to_return->last_used_time > max_idle_time_before_ping_) {
+                lock.unlock(); // Unlock while pinging
+                healthy = conn_to_return->ping();
+                lock.lock(); // Re-lock
+
+                if (shutting_down_) { // Check after re-lock
+                     if(conn_to_return) conn_to_return->disconnect(); // clean up
+                     throw ConnectionException("Connection manager is shutting down during health check.");
+                }
+            }
+
+            if (!healthy || !conn_to_return->is_connected()) {
+                stats_.connection_errors++;
+                stats_.total_connections--; // It was part of the pool, now it's gone
+                conn_to_return.reset(); // Explicitly destroy bad connection
+                continue; // Retry getting a connection from the start of the loop.
+            }
+
+            // If we reach here, conn_to_return is healthy and valid
+            stats_.active_connections++;
+            return conn_to_return;
+
+        } else if ((stats_.active_connections + pool_.size()) < static_cast<size_t>(config_.connection_pool_size)) {
+            // Pool is not full (total connections < max), create a new connection
+            lock.unlock();
+            std::unique_ptr<RedisConnection> new_conn = create_new_connection(config_.host, config_.port);
+            lock.lock(); // Re-acquire lock
+
+            if (shutting_down_) { // Check after re-acquiring lock
+                if(new_conn) new_conn->disconnect();
+                throw ConnectionException("Connection manager is shutting down during new connection creation.");
+            }
+
+            if (new_conn && new_conn->is_connected()) {
+                stats_.total_connections++; // Increment when a new connection is successfully created
+                stats_.active_connections++;
+                return new_conn;
+            } else {
+                stats_.connection_errors++;
+                // Failed to create new connection.
+                // Depending on policy, we could retry in the loop, or throw.
+                // Throwing for now, as continuous failure might indicate a bigger problem.
+                throw ConnectionException("Failed to create new connection. Host: " + config_.host + ":" + std::to_string(config_.port));
+            }
+        } else {
+            // This case should ideally not be reached if CV wait condition is correct and no timeouts.
+            // It means available_connections_ is empty AND pool is full (cannot create more).
+            // This implies all connections are active. The CV should wait.
+            // If we are here, it might be due to a timeout on CV wait (not implemented yet) or a logic flaw.
+            // For robustness, if this state is reached, throw.
+            throw ConnectionException("No available connections and pool is at max capacity and cannot create more.");
+        }
+    } // End of while(true)
 }
 
 
 void RedisConnectionManager::return_connection(std::unique_ptr<RedisConnection> conn) {
     if (!conn) return;
 
-    // Simplified: Connection is not returned to a pool for reuse.
-    // It will be destroyed when `conn` (the unique_ptr) goes out of scope.
-    // The `initialize_pool` creates some initial connections, but they are not currently reused by this get/return mechanism.
-    // A real implementation would add `conn` back to `available_connections_` if it's healthy and there's space.
+    bool returned_to_pool = false;
+    { // Scope for lock
+        std::unique_lock<std::mutex> lock(pool_mutex_);
+        stats_.active_connections--;
 
-    std::unique_lock<std::mutex> lock(pool_mutex_); // Lock for stats update
-    stats_.active_connections--;
+        if (shutting_down_) {
+            conn->disconnect();
+            // total_connections will be decremented outside lock if it wasn't returned
+        } else if (conn->is_connected() && (stats_.active_connections + pool_.size()) < static_cast<size_t>(config_.connection_pool_size)) {
+            // The condition `(stats_.active_connections + pool_.size()) < config_.connection_pool_size` ensures that
+            // by adding this connection (which was active, now idle) back to the pool (pool_.size() will increment),
+            // we don't exceed the total connection limit.
+            // active_connections has already been decremented.
+            // So, we check if (current active + current idle + 1 for this conn) <= limit
+            // which is (stats_.active_connections + pool_.size() + 1) <= config_.connection_pool_size
+            // Or, more simply, if pool_.size() < config_.connection_pool_size (max number of idle connections)
+            // AND total connections (active + idle) < max_total_connections
+            // The current model: pool_ stores idle. config_.connection_pool_size is max *total* connections.
+            // So, if returning an active connection to idle:
+            // New idle count = pool_.size() + 1
+            // New active count = stats_.active_connections (already decremented)
+            // Total = stats_.active_connections + pool_.size() + 1. This must be <= config_.connection_pool_size.
+            if ((stats_.active_connections + pool_.size() + 1) <= static_cast<size_t>(config_.connection_pool_size) ) {
+                available_connections_.push(conn.get());
+                pool_.push_back(std::move(conn));
+                stats_.idle_connections++;
+                condition_.notify_one();
+                returned_to_pool = true;
+            } else {
+                 // Pool is at capacity for total connections if this one were to be made idle.
+                 // This implies it should be discarded.
+                conn->disconnect();
+                stats_.connection_errors++; // Or some other stat for "discarded due to pool full"
+            }
+        } else {
+            // Connection is not healthy, or some other reason not to return.
+            if (!conn->is_connected()) {
+                stats_.connection_errors++;
+            }
+            conn->disconnect();
+        }
+    } // Lock released
 
-    // If we were to implement pooling here:
-    // if (!shutting_down_ && pool_.size() < static_cast<size_t>(config_.connection_pool_size)) {
-    //     if (conn->ping()) { // Check health before pooling
-    //         pool_.push_back(std::move(conn)); // Add to main ownership vector
-    //         available_connections_.push(pool_.back().get()); // Add raw ptr to available queue
-    //         stats_.idle_connections++;
-    //         condition_.notify_one();
-    //         return; // Successfully returned to pool
-    //     } else {
-    //         stats_.connection_errors++;
-    //         // Bad connection, don't pool it. Falls through to be destroyed.
-    //     }
-    // }
-    // If not returned to pool (e.g. pool full, shutting down, or bad conn), it's destroyed by unique_ptr.
-    // For this simplified version, it always falls through and gets destroyed by unique_ptr.
-    // We just decrement active_connections.
+    if (!returned_to_pool) {
+        // If connection was not returned to pool (shutting down, unhealthy, or pool at capacity),
+        // it means it's no longer managed by the pool, so decrement total_connections.
+        // This needs to be done carefully, as total_connections is also modified by get_connection when creating new.
+        // This logic assumes that any connection passed to return_connection was previously counted in total_connections.
+        std::atomic_fetch_sub(&stats_.total_connections, 1u); // Ensure atomic operation
+    }
 }
 
 
@@ -379,14 +479,119 @@ void RedisConnectionManager::health_check_loop() {
 
             // For now, health_check_loop only focuses on primary_healthy_ status via check_primary_health().
             // Individual connections are checked more lazily (e.g. on get_connection or by more detailed health check).
+            // More detailed check for idle connections in the pool:
+            // Iterate `pool_` (which contains unique_ptrs to idle connections).
+            // If a connection fails ping, remove it from `pool_` and `available_connections_`.
+            // Then call maintain_pool_size.
+
+            // Need to be careful with iterators if removing elements.
+            // A common pattern: iterate backwards or use iterators correctly after erasure.
+            for (auto it = pool_.begin(); it != pool_.end(); /* no increment here */) {
+                if (shutting_down_ || !run_health_checker_) break;
+                RedisConnection* conn_ptr = it->get();
+                bool is_in_available_queue = false; // Check if conn_ptr is in available_connections_
+
+                // To check if conn_ptr is in available_connections_, we'd have to iterate the queue.
+                // This is inefficient. Assume all connections in pool_ are meant to be available if healthy.
+                // The health_check_loop should primarily ensure that connections *in the pool* (idle ones) are healthy.
+
+                // Let's refine: available_connections_ queue should be the source of truth for idle connections to check.
+                // However, pool_ is the owner.
+                // Iterate pool_. Ping each connection. If bad, remove from available_connections_ (if present) and from pool_.
+                // This is complex due to available_connections_ storing raw pointers.
+
+                // Simpler approach for health_check_loop:
+                // Check a portion of idle connections or focus on very old ones.
+                // For now, let's iterate `pool_` (which are all idle connections by current design).
+                if (!(*it)->ping()) {
+                    stats_.connection_errors++;
+                    // This connection is bad. Remove it from available_connections_ queue first.
+                    // This requires finding the raw pointer in the queue.
+                    std::queue<RedisConnection*> new_available_connections;
+                    while(!available_connections_.empty()){
+                        RedisConnection* q_conn = available_connections_.front();
+                        available_connections_.pop();
+                        if(q_conn != conn_ptr){
+                            new_available_connections.push(q_conn);
+                        } else {
+                            stats_.idle_connections--; // It was idle, now removed
+                        }
+                    }
+                    available_connections_ = new_available_connections;
+
+                    // Now remove from pool_
+                    it = pool_.erase(it); // erase returns iterator to next element
+                    stats_.total_connections--; // A connection is gone
+                } else {
+                    ++it; // Only increment if not erased
+                }
+            }
+            // After checking and removing bad ones, try to replenish.
+            maintain_pool_size(lock); // maintain_pool_size expects the lock to be held
         }
 
+
         // Wait for the interval or until notified (e.g., for shutdown)
-        std::unique_lock<std::mutex> cv_lock(pool_mutex_); // Mutex for condition variable
+        std::unique_lock<std::mutex> cv_lock(pool_mutex_); // Mutex for condition variable, different from the one passed to maintain_pool_size
         if (shutting_down_ || !run_health_checker_) break;
         condition_.wait_for(cv_lock, health_check_interval_, [this]{ return shutting_down_.load() || !run_health_checker_.load(); });
     }
 }
+
+// Helper function to ensure pool maintains a minimum number of healthy connections
+// up to config_.connection_pool_size, if specified.
+// Assumes pool_mutex_ is already locked by the caller.
+void RedisConnectionManager::maintain_pool_size(std::unique_lock<std::mutex>& lock) {
+    if (shutting_down_ || !run_health_checker_) return;
+
+    // Example: Maintain a minimum number of idle connections, e.g., config_.connection_pool_size / 2 or a fixed number.
+    // For now, let's try to fill up to config_.connection_pool_size if below.
+    // This is aggressive and might not be ideal if connections are expensive or traffic is low.
+    // A more nuanced strategy would consider min_idle, max_idle, etc.
+
+    size_t desired_pool_size = static_cast<size_t>(config_.connection_pool_size);
+    // This is max total. If pool_ stores idle, then desired idle might be smaller.
+    // Let's assume for now we want to keep the pool of *idle* connections full if possible.
+    // No, config_.connection_pool_size is the *total* (active + idle).
+    // So, we can only add new idle connections if (active + current_idle) < max_total.
+
+    while ((stats_.active_connections + pool_.size()) < desired_pool_size && !shutting_down_) {
+        // Unlock mutex while creating a new connection to avoid deadlock / long lock hold.
+        // This is tricky as the lock was passed in.
+        // Alternative: maintain_pool_size creates connections without releasing the main lock if create_new_connection is fast.
+        // For now, let's assume create_new_connection is acceptable to call with lock held, or refactor create_new_connection.
+        // Given create_new_connection involves network I/O, it's better to release.
+        // This means maintain_pool_size cannot take unique_lock by reference if it unlocks/relocks.
+        // Let's simplify: maintain_pool_size will just try to add one connection if needed and possible.
+
+        // This function is called from health_check_loop, which holds its own lock.
+        // The lock passed here is that same lock.
+
+        if ((stats_.active_connections + pool_.size()) >= desired_pool_size) {
+            break; // Pool is full enough
+        }
+
+        // Temporarily release lock to create connection
+        lock.unlock();
+        auto conn = create_new_connection(config_.host, config_.port);
+        lock.lock(); // Re-acquire the lock
+
+        if (shutting_down_) break; // Check again after re-acquiring lock
+
+        if (conn && conn->is_connected()) {
+            available_connections_.push(conn.get());
+            pool_.push_back(std::move(conn));
+            stats_.idle_connections++;
+            stats_.total_connections++;
+            condition_.notify_one(); // A new connection is available
+        } else {
+            stats_.connection_errors++;
+            // Failed to create, maybe stop trying for a bit in this cycle
+            break;
+        }
+    }
+}
+
 
 bool RedisConnectionManager::check_primary_health() {
     // Tries to establish a new, temporary connection to check primary server health.
