@@ -27,15 +27,21 @@ protected:
 
         // Crude check for live Redis
         try {
-            client_config_.connection_pool_size = 0;
-            auto temp_conn_manager = std::make_unique<RedisConnectionManager>(client_config_);
-            auto conn = temp_conn_manager->get_connection();
-            if (conn && conn->is_connected() && conn->ping()) {
+            // Directly use RedisConnection for the availability check
+            redisjson::RedisConnection test_conn(
+                client_config_.host,
+                client_config_.port,
+                client_config_.password,
+                client_config_.database,
+                client_config_.timeout
+            );
+            if (test_conn.connect() && test_conn.ping()) {
                 live_redis_available_ = true;
             }
+            // test_conn will disconnect and free context in its destructor
         } catch (const std::exception& e) {
             live_redis_available_ = false;
-            std::cerr << "Live Redis instance not detected for TransactionManager tests: " << e.what() << std::endl;
+            std::cerr << "Live Redis instance not detected for TransactionManager tests (using direct connection): " << e.what() << std::endl;
         }
          if (!live_redis_available_) {
              std::cout << "Skipping TransactionManager tests that require live Redis." << std::endl;
