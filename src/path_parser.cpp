@@ -38,8 +38,23 @@ std::vector<PathParser::PathElement> PathParser::parse(const std::string& path_s
     std::string path_str = trim(path_str_in);
 
     if (path_str.empty()) {
+        // "" is not a valid path, but "$" is.
+        // Current parser returns empty for empty string. This might be okay if client ensures non-empty paths.
+        // Or, throw InvalidPathException for empty string.
+        // For now, let's assume an empty path string might mean "current node" or is invalid contextually.
+        // If it's meant to be root, it should be "$".
+        // Returning empty elements for empty string.
         return elements;
     }
+
+    if (path_str == "$") {
+        // Represent root path, perhaps with a special PathElement or by convention (empty elements list)
+        // For now, an empty elements list might signify root, or a specific root element type.
+        // Let's return empty, and callers can check path_str == "$" or elements.empty().
+        // PathParser::is_root_path can encapsulate this.
+        return elements;
+    }
+
 
     std::string current_segment;
     for (size_t i = 0; i < path_str.length(); ++i) {
@@ -213,5 +228,95 @@ std::vector<std::string> PathParser::expand_wildcards(const json& document,
     auto parsed = parse(path_str);
     return expand_wildcards(document, parsed);
 }
+
+
+// Static helper implementations
+bool PathParser::is_root_path(const std::string& path_str) {
+    return trim(path_str) == "$";
+}
+
+// This is a heuristic. A path like "a.b" doesn't strictly define 'b' as an array
+// until an operation like "a.b[0]" or "a.b.append(...)" is attempted.
+// This function primarily checks if the *final* element of a path is an INDEX type,
+// or if the context (e.g., an append operation) implies an array.
+// The `doc_context` is tricky here. If path_elements_to_target is "foo.bar[0]",
+// doc_context would be the root doc. If it's just "foo", doc_context is root.
+// A more robust check is usually done at the point of operation by JSONModifier.
+// For RedisJSONClient's usage, it was trying to guess if a new path should create an array.
+// This simplified version just checks if the last path element hints at an array.
+bool PathParser::is_array_path(const std::vector<PathElement>& path_elements_to_target, const json& /*doc_context unused for now*/) {
+    if (path_elements_to_target.empty()) {
+        return false; // Root path, could be an array, but not by path structure alone. Operation defines it.
+    }
+    // If the last element is an index, it implies the parent should be an array.
+    // If the client code is checking is_array_path for "a.b" *before* appending like "a.b[0]",
+    // this function won't help much. It's more for when the path is already "a.b[0]".
+    // The usage in RedisJSONClient: `PathParser::is_array_path(parsed_path, current_doc, *_path_parser)`
+    // where `parsed_path` is for the *target*.
+    // If `parsed_path` ends in an index, or if an operation like `array_append` is used,
+    // then it's an array path.
+    // For now, let's say a path is an "array path" if its last element implies array access (INDEX)
+    // or if it's empty and the operation implies array (e.g. client wants to append to root "$").
+    // This is insufficient for the client's predictive need.
+    // The `JSONModifier::navigate_to_element` with `create_missing_paths` is smarter.
+    // Client should rely on JSONModifier or specific Lua scripts for array creation logic.
+    // This function might be misleading as defined.
+    // A simpler interpretation: does this path *target* an array element (i.e. ends in an index)?
+    const auto& last_el = path_elements_to_target.back();
+    return last_el.type == PathElement::Type::INDEX;
+    // A more complex version might inspect `doc_context` at `path_elements_to_target` (excluding last element)
+    // and see if the element *is* an array. But this is what JSONModifier::get would do.
+}
+
+std::string PathParser::escape_key_if_needed(const std::string& key_name) {
+    // Simple check: if key contains characters that need bracketing and quotes in JSONPath-like syntax.
+    // This isn't full JSONPath spec escaping, just for basic reconstruction.
+    if (key_name.empty() || key_name.find_first_of(" .[]\"'") != std::string::npos) {
+        // More robust escaping would replace internal quotes, etc.
+        std::string escaped_key = key_name;
+        // Minimal: replace ' with \' (this is not standard JSONPath, just an example)
+        // For nlohmann::json style paths, often no escaping is needed for keys if accessed via .at() or ["key"].
+        // For reconstruction into a string path, it matters.
+        // Let's assume for now keys are "simple" or reconstruction handles it.
+        return "'" + escaped_key + "'"; // Simplified: always quote if contains special chars or is empty
+    }
+    return key_name;
+}
+
+std::string PathParser::reconstruct_path(const std::vector<PathElement>& path_elements) {
+    if (path_elements.empty()) {
+        return "$"; // Represent root
+    }
+    std::string p_str;
+    bool first_key = true;
+    for (size_t i = 0; i < path_elements.size(); ++i) {
+        const auto& el = path_elements[i];
+        switch (el.type) {
+            case PathElement::Type::KEY:
+                if (!first_key && (p_str.empty() || p_str.back() != ']')) { // Avoid leading dot if first element, or dot after bracket
+                    p_str += ".";
+                }
+                p_str += el.key_name; // Simplified: assumes key_name is safe or PathParser::escape_key_if_needed was used
+                first_key = false;
+                break;
+            case PathElement::Type::INDEX:
+                p_str += "[" + std::to_string(el.index) + "]";
+                first_key = false; // After an index, next key doesn't need a dot if it's a quoted key in brackets
+                break;
+            // TODO: Add other types (SLICE, WILDCARD, etc.)
+            default:
+                // This should ideally not happen if path_elements is valid
+                p_str += ".<ERROR_UNKNOWN_PATH_ELEMENT>";
+                break;
+        }
+    }
+    // If path started with an index (e.g. [0].key), p_str would be "[0].key".
+    // If it was just keys like "a.b.c", it would be "a.b.c".
+    // If it was root and empty elements, we return "$".
+    // If path_elements was not empty but resulted in empty string (should not happen with this logic),
+    // it would be an issue.
+    return p_str;
+}
+
 
 } // namespace redisjson

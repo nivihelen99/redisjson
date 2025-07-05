@@ -30,6 +30,19 @@ public:
     std::string normalize_path(const std::string& path) const;
     std::vector<std::string> expand_wildcards(const nlohmann::json& document,
                                              const std::string& path) const;
+
+    // Static helpers
+    static bool is_root_path(const std::string& path_str);
+    // Determines if the path implies the target should be an array, useful for creation logic.
+    // This is a heuristic. A path like "a.b" doesn't strictly define 'b' as an array
+    // until an operation like "a.b[0]" or "a.b.append(...)" is attempted.
+    // `path_elements` is the path to the potential array.
+    // `doc_context` is the document up to the parent of the potential array.
+    static bool is_array_path(const std::vector<PathElement>& path_elements_to_target, const nlohmann::json& doc_context);
+    static std::string escape_key_if_needed(const std::string& key_name);
+    static std::string reconstruct_path(const std::vector<PathElement>& path_elements);
+
+
 private:
     // Helper for wildcard expansion, if needed to be distinct from public API
     std::vector<std::string> expand_wildcards(const nlohmann::json& document,
