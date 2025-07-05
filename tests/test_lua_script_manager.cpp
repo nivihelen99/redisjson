@@ -30,16 +30,23 @@ protected:
         // Basic check if Redis might be running for more meaningful tests
         // This is a very crude check. A proper setup would use a dedicated test Redis.
         try {
-            client_config_.connection_pool_size = 0; // Avoid health checker for this check
-            auto test_conn_manager = std::make_unique<RedisConnectionManager>(client_config_);
-            auto conn = test_conn_manager->get_connection(); // Uses simplified get_connection
-            if (conn && conn->is_connected() && conn->ping()) {
+        // Directly use RedisConnection for the availability check
+        // Using default client_config_ for host, port, timeout settings.
+        redisjson::RedisConnection test_conn(
+            client_config_.host,
+            client_config_.port,
+            client_config_.password,
+            client_config_.database,
+            client_config_.timeout
+        );
+        if (test_conn.connect() && test_conn.ping()) {
                 live_redis_available_ = true;
             }
+        // test_conn will disconnect and free context in its destructor
         } catch (const std::exception& e) {
             // Connection failed, assume Redis not available for tests
             live_redis_available_ = false;
-            std::cerr << "Live Redis instance not detected for LuaScriptManager tests: " << e.what() << std::endl;
+        std::cerr << "Live Redis instance not detected for LuaScriptManager tests (using direct connection): " << e.what() << std::endl;
         }
         if (!live_redis_available_) {
              std::cout << "Skipping LuaScriptManager tests that require live Redis." << std::endl;
