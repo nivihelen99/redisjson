@@ -418,9 +418,12 @@ bool RedisConnectionManager::is_healthy() const {
 }
 
 redisjson::ConnectionStats RedisConnectionManager::get_stats() const {
-    // Access to stats members should be atomic or protected if modified by multiple threads
-    // (e.g. health checker). `std::atomic` is used, so direct return is fine.
-    return stats_;
+    return {
+        stats_.total_connections.load(std::memory_order_relaxed),
+        stats_.active_connections.load(std::memory_order_relaxed),
+        stats_.idle_connections.load(std::memory_order_relaxed),
+        stats_.connection_errors.load(std::memory_order_relaxed)
+    };
 }
 
 void RedisConnectionManager::set_health_check_interval(std::chrono::seconds interval) {
