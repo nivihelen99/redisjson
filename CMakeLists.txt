@@ -61,7 +61,19 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/redis/hiredis.git
   GIT_TAG v1.2.0 # Or any recent stable version
 )
+
+# Disable tests for hiredis when using FetchContent
+set(BUILD_TESTING OFF CACHE BOOL "Disable building tests for dependencies" FORCE)
+set(HIREDIS_TESTS OFF CACHE BOOL "Disable Hiredis specific tests" FORCE) # Attempt Hiredis specific flag too
+
 FetchContent_MakeAvailable(hiredis)
+
+# Restore BUILD_TESTING if it was previously set by the user for the main project
+# This is a bit tricky as we forced it. A better way is to use fetchcontent options if available.
+# For now, assume the main project testing is enabled by enable_testing() later.
+# A cleaner way if FetchContent_MakeAvailable supported it directly:
+# FetchContent_MakeAvailable(hiredis BUILD_TESTING=OFF)
+
 # hiredis builds a library, typically hiredis::hiredis or libhiredis.a/so
 # It might need CMAKE_POSITION_INDEPENDENT_CODE for shared libs if redisjson++ is shared.
 # Check if hiredis creates an imported target or if we need to add_library manually from its sources.

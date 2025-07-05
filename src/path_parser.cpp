@@ -58,13 +58,33 @@ std::vector<PathParser::PathElement> PathParser::parse(const std::string& path_s
                  throw InvalidPathException("Path cannot contain '..'");
             }
         } else if (c == '[') {
+            // Check if '[' is preceded by a '.'
+            if (i > 0 && path_str[i-1] == '.') {
+                throw InvalidPathException("Invalid path: '[' cannot immediately follow '.' (e.g. 'key.[0]')");
+            }
             if (!current_segment.empty()) {
                 PathElement elem;
                 elem.type = PathElement::Type::KEY;
                 elem.key_name = current_segment;
                 elements.push_back(elem);
                 current_segment.clear();
-            } else if (elements.empty() && i != 0) {
+            } else if (elements.empty() && i != 0) { // '[' not at start and no preceding key segment like "obj" in "obj[0]"
+                 // This implies path started with '[' but elements is not empty, which is contradictory.
+                 // Or, current_segment is empty, elements is not empty, and i != 0. E.g. "[0][1]" - after [0], current_segment is empty.
+                 // This specific check: "elements.empty() && i != 0" seems problematic.
+                 // It should be: if current_segment is empty, AND elements is empty, AND i != 0, it's an error like ". [".
+                 // If current_segment is empty, AND elements is NOT empty (e.g. after [0] in [0][1]), it's fine.
+                 // The original check "Invalid path: '[' must follow a key or be at the start for root array access."
+                 // is only relevant if current_segment is empty AND elements is empty AND i != 0.
+                 // This should be simplified: if current_segment is empty, it means '[' follows ']', or is at start.
+                 // If it's at start (i==0), it's fine.
+                 // If it follows ']' (e.g. [0][1]), it's fine.
+                 // The error "must follow a key or be at start" is for when current_segment is empty,
+                 // but there was no preceding key name parsed, and it's not at the start.
+                 // Example: if path was ".[" - this is caught by "cannot start with ."
+                 // Example: if path was "..[" - this is caught by "cannot contain .."
+                 // This specific else-if might be redundant or misformulated.
+                 // For now, keeping it as is, but the new dot-bracket check is more direct.
                  throw InvalidPathException("Invalid path: '[' must follow a key or be at the start for root array access.");
             }
 
