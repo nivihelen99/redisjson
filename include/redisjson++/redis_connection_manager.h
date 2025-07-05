@@ -19,12 +19,20 @@ namespace redisjson {
 // Forward declare ClientConfig if it's not included via redis_json_client.h or a common header
 // struct ClientConfig;
 
-struct ConnectionStats {
+// Internal struct with atomic members for thread-safe updates
+struct ConnectionStatsInternal {
     std::atomic<uint32_t> total_connections{0};
     std::atomic<uint32_t> active_connections{0};
     std::atomic<uint32_t> idle_connections{0};
     std::atomic<uint64_t> connection_errors{0};
-    // More stats can be added: avg_connection_time, reconnects, etc.
+};
+
+// Snapshot struct with plain types for returning by value
+struct ConnectionStats {
+    uint32_t total_connections;
+    uint32_t active_connections;
+    uint32_t idle_connections;
+    uint64_t connection_errors;
 };
 
 // Represents a single connection to Redis
@@ -81,7 +89,14 @@ public:
 
     // Health Monitoring
     bool is_healthy() const; // Overall health of the pool / primary connection
-    const ConnectionStats& get_stats() const; // Return by const reference
+    ConnectionStats get_stats() const {
+        return {
+            stats_.total_connections.load(std::memory_order_relaxed),
+            stats_.active_connections.load(std::memory_order_relaxed),
+            stats_.idle_connections.load(std::memory_order_relaxed),
+            stats_.connection_errors.load(std::memory_order_relaxed)
+        };
+    }
     void set_health_check_interval(std::chrono::seconds interval); // 0 to disable
 
     // Failover Support (Basic stubs, full failover is complex)
@@ -99,7 +114,7 @@ private:
     std::queue<RedisConnection*> available_connections_; // Pointers to connections in pool_
     std::mutex pool_mutex_;
     std::condition_variable condition_;
-    ConnectionStats stats_;
+    ConnectionStatsInternal stats_; // Use internal struct for atomics
 
     std::atomic<bool> shutting_down_{false};
     std::atomic<bool> primary_healthy_{false}; // Simplified health status
