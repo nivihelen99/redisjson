@@ -108,8 +108,10 @@ private:
     std::thread health_check_thread_;
     std::atomic<bool> run_health_checker_{false};
     std::chrono::seconds health_check_interval_ = std::chrono::seconds(5);
+    std::chrono::seconds max_idle_time_before_ping_ = std::chrono::seconds(60); // Max idle time before pinging on get, can be configurable
     void health_check_loop();
     bool check_primary_health(); // Specific check for the main configured host/port
+    void maintain_pool_size(std::unique_lock<std::mutex>& lock); // Helper to replace bad/idle connections
 
     // Event callbacks
     std::function<void(const std::string&)> connection_lost_callback_;
