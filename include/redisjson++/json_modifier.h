@@ -40,7 +40,7 @@ public:
      * Throws InvalidPathException for issues with path structure.
      */
     void set(json& document, const std::vector<PathParser::PathElement>& path_elements,
-             const json& value_to_set);
+             const json& value_to_set, bool create_path = true, bool overwrite = true);
 
     /**
      * Deletes the JSON value or element at the specified path.

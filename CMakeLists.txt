@@ -106,6 +106,27 @@ target_link_libraries(unit_tests PRIVATE redisjson++ GTest::gtest_main GTest::gm
 include(GoogleTest)
 gtest_discover_tests(unit_tests)
 
+# --- Examples ---
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/sample.cpp")
+    add_executable(redisjson_sample_program examples/sample.cpp)
+    target_link_libraries(redisjson_sample_program PRIVATE redisjson++)
+    # Dependencies like hiredis and nlohmann_json should be linked transitively by redisjson++
+    # if redisjson++ itself is properly configured to export its dependencies or link them publicly.
+    # If redisjson++ links hiredis and nlohmann_json as PRIVATE, then the example program
+    # might also need to link to them directly if it uses their headers directly,
+    # or if the compiler/linker needs them explicitly for redisjson++'s public headers.
+    # Assuming redisjson++ handles its dependencies' include directories for its public headers.
+    # If explicit linking for dependencies is needed for the example:
+    # target_link_libraries(redisjson_sample_program PRIVATE hiredis::hiredis)
+    # if(TARGET nlohmann_json::nlohmann_json) # nlohmann is often header-only
+    #    target_link_libraries(redisjson_sample_program PRIVATE nlohmann_json::nlohmann_json)
+    # endif()
+    message(STATUS "Added example program target: redisjson_sample_program")
+else()
+    message(STATUS "examples/sample.cpp not found, redisjson_sample_program target not created.")
+endif()
+
+
 # Installation (optional)
 # install(TARGETS redisjson++ DESTINATION lib)
 # install(DIRECTORY include/ DESTINATION include)
