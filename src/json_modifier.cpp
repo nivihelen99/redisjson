@@ -249,31 +249,44 @@ void JSONModifier::set(json& document, const std::vector<PathParser::PathElement
 
     if (std::holds_alternative<std::string>(final_accessor)) {
         const std::string& key = std::get<std::string>(final_accessor);
-        if (!parent->is_object()) { // Should have been made an object by navigate_to_parent if create_missing_paths
+        if (parent->is_null()) { // Promote null to object if necessary
+            *parent = json::object();
+        }
+        if (!parent->is_object()) {
              throw TypeMismatchException(reconstruct_path_string(path_elements, path_elements.size()-2), "object", parent->type_name());
         }
         (*parent)[key] = value_to_set;
     } else { // INDEX
         int index = std::get<int>(final_accessor);
-         if (!parent->is_array()) { // Should have been made an array
+        if (parent->is_null()) { // Promote null to array if necessary
+            *parent = json::array();
+        }
+         if (!parent->is_array()) {
              throw TypeMismatchException(reconstruct_path_string(path_elements, path_elements.size()-2), "array", parent->type_name());
         }
-        if (index < 0 ) { // This should have been handled by navigate_to_parent to be positive relative to current size
-             throw IndexOutOfBoundsException(index, parent->size()); // Should not happen if navigate_to_parent is correct
+
+        // Index must be non-negative at this point due to navigate_to_parent adjustments for direct array access.
+        // However, original path might have had negative, so final_accessor's stored int is the effective positive index.
+        if (index < 0) {
+            // This should ideally not be hit if navigate_to_parent correctly resolved negative indices
+            // for the final_accessor. If it's hit, it implies a logic flaw in how negative indices are
+            // translated or that the array became empty unexpectedly.
+            throw IndexOutOfBoundsException(index, parent->size());
         }
-        if (static_cast<size_t>(index) == parent->size()) {
-            parent->push_back(value_to_set); // Append if index is one past the end
-        } else if (static_cast<size_t>(index) < parent->size()) {
-            (*parent)[index] = value_to_set; // Overwrite existing element
-        } else { // index > parent->size()
-            // navigate_to_parent with create_missing_paths should have resized and filled with nulls
-            // This case indicates an index still too large after creation logic, or logic error.
-            // For safety, throw, but ideally navigate_to_parent handles this.
-            // If parent array was just created, it's empty. index must be 0.
-            // If it was `key : null` and we are setting `key[0]`, parent becomes `key: []`.
-            // Then `parent[0] = value` is valid.
-            // This path implies navigate_to_parent didn't extend array sufficiently.
-             throw IndexOutOfBoundsException(std::get<int>(final_accessor), parent->size());
+
+        if (static_cast<size_t>(index) < parent->size()) {
+            (*parent)[index] = value_to_set; // Overwrite
+        } else {
+            // Append nulls until index is reachable, then append/set the value
+            // Example: parent is [], index is 1. Goal: [null, value_to_set]
+            // parent.size() = 0, index = 1. Loop: while (0 < 1) -> parent.push_back(null) -> parent is [null], size 1
+            // Loop: while (1 < 1) -> false.
+            // parent.push_back(value_to_set) -> parent is [null, value_to_set]
+            while (parent->size() < static_cast<size_t>(index)) {
+                parent->push_back(json(nullptr));
+            }
+            // After loop, parent->size() == index. Now push the actual value.
+            parent->push_back(value_to_set);
         }
     }
 }
