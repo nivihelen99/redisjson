@@ -353,9 +353,9 @@ RedisConnectionManager::RedisConnectionPtr RedisConnectionManager::get_connectio
             } else {
                 stats_.connection_errors++;
                std::string error_detail = "Unknown connection failure.";
-               if (new_conn) { // new_conn exists but is not connected
-                   error_detail = new_conn->get_last_error();
-               } else { // new_conn itself is null, though create_new_connection always returns a unique_ptr
+               if (new_conn_temp) { // new_conn_temp exists but is not connected
+                   error_detail = new_conn_temp->get_last_error();
+               } else { // new_conn_temp itself is null, though create_new_connection always returns a unique_ptr
                    error_detail = "Failed to allocate RedisConnection object.";
                }
                throw ConnectionException("Failed to create new connection to " + config_.host + ":" + std::to_string(config_.port) + ". Detail: " + error_detail);
