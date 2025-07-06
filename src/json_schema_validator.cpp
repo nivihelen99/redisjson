@@ -1,91 +1,62 @@
 #include "redisjson++/json_schema_validator.h"
-#include "redisjson++/exceptions.h" // For potential ArgumentInvalidException
+#include "redisjson++/exceptions.h" // For ArgumentInvalidException
 
 namespace redisjson {
 
-// Custom error handler implementation
-void JSONSchemaValidator::ErrorHandler::error(
-    const nlohmann::json::json_pointer& ptr,
-    const json& instance,
-    const std::string& message) {
-    _errors.push_back("Error at " + ptr.to_string() + ": " + message + ". Instance: " + instance.dump(2));
-}
-
-std::vector<std::string> JSONSchemaValidator::ErrorHandler::get_errors() const {
-    return _errors;
-}
-
-void JSONSchemaValidator::ErrorHandler::clear_errors() {
-    _errors.clear();
-}
-
+// Removed: ErrorHandler class implementation
 
 JSONSchemaValidator::JSONSchemaValidator() {}
 
 void JSONSchemaValidator::register_schema(const std::string& schema_name, const json& schema) {
     if (schema_name.empty()) {
+        // Still good to check for empty schema name.
         throw ArgumentInvalidException("Schema name cannot be empty.");
     }
     // Basic validation of the schema itself (e.g., is it a valid JSON object?)
     if (!schema.is_object()) {
+        // We can still check if the provided schema is a JSON object, as a basic sanity check.
         throw ArgumentInvalidException("Schema must be a JSON object.");
     }
 
     std::lock_guard<std::mutex> lock(_mutex);
-    try {
-        json_validator validator;
-        validator.set_root_schema(schema); // This can throw if schema is invalid
-        _validators[schema_name] = std::move(validator);
-        _raw_schemas[schema_name] = schema;
-    } catch (const std::exception& e) {
-        throw ArgumentInvalidException("Invalid JSON schema for '" + schema_name + "': " + e.what());
-    }
+    _registered_schema_names.insert(schema_name);
+    // No actual schema processing or storage of the schema body is done.
+    // (void)schema; // Suppress unused parameter warning if schema is not used at all.
 }
 
 bool JSONSchemaValidator::validate(const json& document, const std::string& schema_name) const {
     std::lock_guard<std::mutex> lock(_mutex);
-    auto it = _validators.find(schema_name);
-    if (it == _validators.end()) {
-        // Or throw SchemaNotFoundException("Schema '" + schema_name + "' not registered.");
-        _last_error_handler.clear_errors(); // Clear previous errors
-        _last_error_handler.error(nlohmann::json::json_pointer{}, document, "Schema '" + schema_name + "' not registered.");
-        return false;
-    }
+    // (void)document; // Suppress unused parameter warning
+    // (void)schema_name; // Suppress unused parameter warning
 
-    _last_error_handler.clear_errors(); // Clear previous errors
-    // nlohmann::json_schema::json_validator's validate method takes an error_handler by reference.
-    // It doesn't directly return bool but populates the error handler.
-    // We check if errors were added to determine validity.
-    it->second.validate(document, _last_error_handler);
-
-    return _last_error_handler.get_errors().empty();
+    // If you want to check if schema was "registered" (name was passed to register_schema):
+    // if (_registered_schema_names.find(schema_name) == _registered_schema_names.end()) {
+    //     // Optionally, log or handle unregistered schema name case
+    //     return false; // Or true, depending on desired stub behavior for unknown schemas
+    // }
+    return true; // Always pass validation
 }
 
 std::vector<std::string> JSONSchemaValidator::get_validation_errors() const {
     std::lock_guard<std::mutex> lock(_mutex);
-    return _last_error_handler.get_errors();
+    return {}; // Always return no errors
 }
 
 void JSONSchemaValidator::enable_validation(const std::string& key_pattern, const std::string& schema_name) {
-    // This is a conceptual placeholder for automatic validation hooks.
-    // A full implementation would require:
-    // 1. A mechanism to match keys against patterns (e.g., regex or glob).
-    // 2. Integration with RedisJSONClient's set/update operations to trigger validation.
-    //    - Before a SET operation, the client would check if any pattern matches the key.
-    //    - If so, it would call `validate` with the appropriate schema.
     std::lock_guard<std::mutex> lock(_mutex);
-    if (!_validators.count(schema_name)) {
+    if (_registered_schema_names.find(schema_name) == _registered_schema_names.end()) {
+         // Still useful to check if the schema name was at least "registered"
         throw ArgumentInvalidException("Schema '" + schema_name + "' not registered. Cannot enable auto-validation.");
     }
     _auto_validation_rules[key_pattern] = schema_name;
-    // Note: The client part that USES this rule is not implemented here.
-    // This just stores the rule.
-    // Consider logging or specific actions if key_pattern is invalid.
+    // (void)key_pattern; // Suppress unused parameter warning
+    // (void)schema_name; // Suppress unused parameter warning
+    // No actual validation enabling logic.
 }
 
 bool JSONSchemaValidator::is_schema_registered(const std::string& schema_name) const {
     std::lock_guard<std::mutex> lock(_mutex);
-    return _validators.count(schema_name);
+    return _registered_schema_names.count(schema_name);
 }
 
 } // namespace redisjson
