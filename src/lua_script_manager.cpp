@@ -476,7 +476,8 @@ void LuaScriptManager::load_script(const std::string& name, const std::string& s
     if (name.empty() || script_body.empty()) {
         throw std::invalid_argument("Script name and body cannot be empty.");
     }
-    auto conn_guard = connection_manager_->get_connection();
+    // Use RedisConnectionPtr which includes the custom deleter
+    RedisConnectionManager::RedisConnectionPtr conn_guard = connection_manager_->get_connection();
     RedisConnection* conn = conn_guard.get();
     if (!conn || !conn->is_connected()) {
         throw ConnectionException("Failed to get valid Redis connection for SCRIPT LOAD.");
@@ -578,7 +579,8 @@ json LuaScriptManager::execute_script(const std::string& name,
         sha1_hash = it->second;
     }
 
-    auto conn_guard = connection_manager_->get_connection();
+    // Use RedisConnectionPtr which includes the custom deleter
+    RedisConnectionManager::RedisConnectionPtr conn_guard = connection_manager_->get_connection();
     RedisConnection* conn = conn_guard.get();
      if (!conn || !conn->is_connected()) {
         throw ConnectionException("Failed to get valid Redis connection for EVALSHA.");
@@ -641,7 +643,8 @@ bool LuaScriptManager::is_script_loaded(const std::string& name) const {
 }
 
 void LuaScriptManager::clear_all_scripts_cache() {
-    auto conn_guard = connection_manager_->get_connection();
+    // Use RedisConnectionPtr which includes the custom deleter
+    RedisConnectionManager::RedisConnectionPtr conn_guard = connection_manager_->get_connection();
     RedisConnection* conn = conn_guard.get();
     if (!conn || !conn->is_connected()) {
         throw ConnectionException("Failed to get valid Redis connection for SCRIPT FLUSH.");
