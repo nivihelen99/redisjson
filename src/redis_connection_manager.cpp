@@ -265,7 +265,7 @@ std::unique_ptr<RedisConnection> RedisConnectionManager::create_new_connection(c
 }
 
 
-std::unique_ptr<RedisConnection> RedisConnectionManager::get_connection() {
+RedisConnectionManager::RedisConnectionPtr RedisConnectionManager::get_connection() {
     std::unique_lock<std::mutex> lock(pool_mutex_);
 
     while (true) { // Loop to retry if a pooled connection is bad or other transient issues.
@@ -327,23 +327,29 @@ std::unique_ptr<RedisConnection> RedisConnectionManager::get_connection() {
 
             // If we reach here, conn_to_return is healthy and valid
             stats_.active_connections++;
-            return conn_to_return;
+            // Wrap the raw pointer with the custom deleter before returning
+            // conn_to_return is already a unique_ptr, so we pass its raw pointer and the deleter.
+            // The original unique_ptr `conn_to_return` will be empty after `release()`.
+            return RedisConnectionPtr(conn_to_return.release(), RedisConnectionDeleter(this));
 
         } else if ((stats_.active_connections + pool_.size()) < static_cast<size_t>(config_.connection_pool_size)) {
             // Pool is not full (total connections < max), create a new connection
             lock.unlock();
-            std::unique_ptr<RedisConnection> new_conn = create_new_connection(config_.host, config_.port);
+            // Create a temporary standard unique_ptr first
+            std::unique_ptr<RedisConnection> new_conn_temp = create_new_connection(config_.host, config_.port);
             lock.lock(); // Re-acquire lock
 
             if (shutting_down_) { // Check after re-acquiring lock
-                if(new_conn) new_conn->disconnect();
+                if(new_conn_temp) new_conn_temp->disconnect(); // Disconnect if the temporary pointer is valid
                 throw ConnectionException("Connection manager is shutting down during new connection creation.");
             }
 
-            if (new_conn && new_conn->is_connected()) {
+            if (new_conn_temp && new_conn_temp->is_connected()) {
                 stats_.total_connections++; // Increment when a new connection is successfully created
                 stats_.active_connections++;
-                return new_conn;
+                // Wrap the raw pointer with the custom deleter before returning
+                // new_conn_temp will be empty after release().
+                return RedisConnectionPtr(new_conn_temp.release(), RedisConnectionDeleter(this));
             } else {
                 stats_.connection_errors++;
                std::string error_detail = "Unknown connection failure.";
