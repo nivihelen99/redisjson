@@ -206,7 +206,7 @@ TEST_F(JSONModifierTest, GetType) {
 TEST_F(JSONModifierTest, GetSize) {
     EXPECT_EQ(modifier.get_size(test_doc, parser.parse("name")), std::string("RedisJSON++").length()); // String length
     EXPECT_EQ(modifier.get_size(test_doc, parser.parse("features")), 3); // Array size
-    EXPECT_EQ(modifier.get_size(test_doc, parser.parse("details")), 3); // Object size (author, libs, meta - wait, meta is outside)
+    // EXPECT_EQ(modifier.get_size(test_doc, parser.parse("details")), 3); // Object size (author, libs, meta - wait, meta is outside)
                                                                       // details has author, libs. So 2.
                                                                       // Let's recheck test_doc: details has author, libs. meta is sibling.
     // Correcting expectation for "details"
@@ -217,7 +217,7 @@ TEST_F(JSONModifierTest, GetSize) {
             {"redis", "hiredis"}
         }}
     };
-    EXPECT_EQ(modifier.get_size(test_doc, parser.parse("details")), details_obj.size()); // Should be 2
+    EXPECT_EQ(modifier.get_size(test_doc, parser.parse("details")), details_obj.size()); // Should be 2. This is the correct one.
 
     EXPECT_EQ(modifier.get_size(test_doc, parser.parse("meta")), 0); // Size of null (nlohmann json specific, might be 1 by some defs)
                                                                    // nlohmann .size() on null throws. Our get_size returns 0.

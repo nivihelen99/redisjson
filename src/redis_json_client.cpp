@@ -184,11 +184,13 @@ json RedisJSONClient::get_path(const std::string& key, const std::string& path) 
 
     try {
         json result = _lua_script_manager->execute_script("json_path_get", keys, args);
-        // Lua script for get_path should return the JSON value at path, or null if not found.
-        // If path not found, LuaScriptManager::redis_reply_to_json converts Redis NIL to json(nullptr)
-        if (result.is_null()) {
+        // Lua script now returns an array.
+        // If path not found, Lua returns "[]", which parses to an empty json array.
+        if (result.is_array() && result.empty()) {
             throw PathNotFoundException(key, path);
         }
+        // If the path pointed to an explicit JSON null, the Lua script would return "[null]",
+        // which parses to json::array({json(nullptr)}). This is a valid result.
         return result;
     } catch (const LuaScriptException& e) {
         // Check if the Lua error message indicates "path not found" or similar if script signals this way

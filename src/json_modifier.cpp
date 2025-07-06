@@ -368,8 +368,9 @@ size_t JSONModifier::get_size(const json& document,
     switch (element->type()) {
         case json::value_t::object:
         case json::value_t::array:
-        case json::value_t::string:
             return element->size();
+        case json::value_t::string:
+            return element->get<std::string>().length(); // Get actual string length
         case json::value_t::null:
             return 0;
         case json::value_t::number_integer:
