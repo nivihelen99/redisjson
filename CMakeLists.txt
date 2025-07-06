@@ -4,21 +4,12 @@ project(RedisJSONPlusPlus VERSION 1.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
-# Add include directory
-# include_directories(include) # target_include_directories is preferred
-
 # Add source files
 file(GLOB_RECURSE LIB_SOURCES "src/*.cpp")
 
 # Add library
 add_library(redisjson++ ${LIB_SOURCES})
 target_include_directories(redisjson++ PUBLIC include)
-
-# Required dependencies
-# For hiredis, you'd typically find_package and link.
-# Using FetchContent for hiredis for self-contained example, if system packages are not assumed.
-
-include(FetchContent)
 
 # nlohmann_json is now vendored in thirdparty/
 # Add thirdparty to include directories for redisjson++ target
@@ -27,40 +18,38 @@ target_include_directories(redisjson++ PUBLIC thirdparty)
 target_include_directories(redisjson++ INTERFACE thirdparty)
 
 
-# hiredis
-FetchContent_Declare(
-  hiredis
-  GIT_REPOSITORY https://github.com/redis/hiredis.git
-  GIT_TAG v1.2.0 # Or any recent stable version
-)
+# --- Use system-installed hiredis via pkg-config ---
+# Remove FetchContent for hiredis
+# include(FetchContent)
+# FetchContent_Declare(
+#   hiredis
+#   GIT_REPOSITORY https://github.com/redis/hiredis.git
+#   GIT_TAG v1.2.0 # Or any recent stable version
+# )
+# set(BUILD_TESTING OFF CACHE BOOL "Disable building tests for dependencies" FORCE) # Not needed if not using FetchContent for deps
+# set(HIREDIS_TESTS OFF CACHE BOOL "Disable Hiredis specific tests" FORCE) # Not needed
+# FetchContent_MakeAvailable(hiredis)
 
-# Disable tests for hiredis when using FetchContent
-set(BUILD_TESTING OFF CACHE BOOL "Disable building tests for dependencies" FORCE)
-set(HIREDIS_TESTS OFF CACHE BOOL "Disable Hiredis specific tests" FORCE) # Attempt Hiredis specific flag too
+# Find hiredis using pkg-config
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(HIREDIS REQUIRED hiredis)
 
-FetchContent_MakeAvailable(hiredis)
-
-# Restore BUILD_TESTING if it was previously set by the user for the main project
-# This is a bit tricky as we forced it. A better way is to use fetchcontent options if available.
-# For now, assume the main project testing is enabled by enable_testing() later.
-# A cleaner way if FetchContent_MakeAvailable supported it directly:
-# FetchContent_MakeAvailable(hiredis BUILD_TESTING=OFF)
-
-# hiredis builds a library, typically hiredis::hiredis or libhiredis.a/so
-# It might need CMAKE_POSITION_INDEPENDENT_CODE for shared libs if redisjson++ is shared.
-# Check if hiredis creates an imported target or if we need to add_library manually from its sources.
-# Often, FetchContent_MakeAvailable will run hiredis's CMakeLists.txt which should create targets.
-if(TARGET hiredis::hiredis)
-    target_link_libraries(redisjson++ PRIVATE hiredis::hiredis)
+if(HIREDIS_FOUND)
+    message(STATUS "Found system hiredis:")
+    message(STATUS "  HIREDIS_INCLUDE_DIRS: ${HIREDIS_INCLUDE_DIRS}")
+    message(STATUS "  HIREDIS_LIBRARIES: ${HIREDIS_LIBRARIES}")
+    message(STATUS "  HIREDIS_CFLAGS: ${HIREDIS_CFLAGS}") # Other flags like definitions
+    target_include_directories(redisjson++ PUBLIC ${HIREDIS_INCLUDE_DIRS})
+    target_link_libraries(redisjson++ PUBLIC ${HIREDIS_LIBRARIES})
+    # If HIREDIS_CFLAGS contains definitions (e.g., -D flags), they might need to be added:
+    # string(REGEX MATCHALL "-D[^ ]+" HIREDIS_DEFINITIONS "${HIREDIS_CFLAGS}")
+    # target_compile_definitions(redisjson++ PUBLIC ${HIREDIS_DEFINITIONS})
+    # Or more simply, if HIREDIS_CFLAGS are suitable for target_compile_options:
+    # target_compile_options(redisjson++ PUBLIC ${HIREDIS_CFLAGS}) # Be careful with this, might add non-portable flags
 else()
-    # Fallback if hiredis::hiredis target isn't created (older hiredis or CMake setup)
-    # This assumes hiredis source is in ${hiredis_SOURCE_DIR} and builds hiredis_static or hiredis_shared
-    # This part might need adjustment based on how hiredis's CMake actually works.
-    # For simplicity, assuming hiredis::hiredis target is available.
-    message(WARNING "hiredis::hiredis target not found after FetchContent. Linking might fail.")
-    # As a last resort, try to link directly if lib name is known (e.g. hiredis)
-    # target_link_libraries(redisjson++ PRIVATE hiredis)
+    message(FATAL_ERROR "System hiredis not found via pkg-config. Please install hiredis (e.g., libhiredis-dev) or ensure it's in PKG_CONFIG_PATH.")
 endif()
+# --- End of hiredis changes ---
 
 
 # Enable testing with GoogleTest
@@ -82,17 +71,8 @@ gtest_discover_tests(unit_tests)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/sample.cpp")
     add_executable(redisjson_sample_program examples/sample.cpp)
     target_link_libraries(redisjson_sample_program PRIVATE redisjson++)
-    # Dependencies like hiredis and nlohmann_json should be linked transitively by redisjson++
-    # if redisjson++ itself is properly configured to export its dependencies or link them publicly.
-    # If redisjson++ links hiredis and nlohmann_json as PRIVATE, then the example program
-    # might also need to link to them directly if it uses their headers directly,
-    # or if the compiler/linker needs them explicitly for redisjson++'s public headers.
-    # Assuming redisjson++ handles its dependencies' include directories for its public headers.
-    # If explicit linking for dependencies is needed for the example:
-    # target_link_libraries(redisjson_sample_program PRIVATE hiredis::hiredis)
-    # if(TARGET nlohmann_json::nlohmann_json) # nlohmann is often header-only
-    #    target_link_libraries(redisjson_sample_program PRIVATE nlohmann_json::nlohmann_json)
-    # endif()
+    # With redisjson++ linking hiredis PUBLICly (now via system libs),
+    # redisjson_sample_program will also link to hiredis and get its includes correctly.
     message(STATUS "Added example program target: redisjson_sample_program")
 else()
     message(STATUS "examples/sample.cpp not found, redisjson_sample_program target not created.")
@@ -102,8 +82,7 @@ endif()
 # Installation (optional)
 # install(TARGETS redisjson++ DESTINATION lib)
 # install(DIRECTORY include/ DESTINATION include)
-# Installation for FetchContent dependencies might also be needed if they are not header-only
-# and not built as static part of redisjson++
-# install(TARGETS nlohmann_json::nlohmann_json DESTINATION lib) # If it's a target
-# install(TARGETS hiredis::hiredis DESTINATION lib)
-# install(DIRECTORY include/ DESTINATION include)
+# For system dependencies like hiredis, you typically wouldn't reinstall them with your project.
+# Consumers of your installed redisjson++ would need to find hiredis on their system too.
+# This is often handled by exporting your project's dependencies in a CMake config file.
+# (Advanced topic, not covered by this simple change)
