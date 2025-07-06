@@ -187,7 +187,7 @@ json RedisJSONClient::get_path(const std::string& key, const std::string& path) 
             // JSON.GET for a path can return an array of values if the path is a multi-path expression,
             // or a single JSON value if the path points to a single value.
             // The result is always a string that needs to be parsed as JSON.
-            // If it's a single value (e.g. a number like `42` or a string like `"hello"`),
+            // If it's a single value (e.g. a number like `42` or a string like `"hello"`), 
             // nlohmann::json::parse will handle it correctly.
             // If it's an array of values (e.g. `[1,2,3]`), it will also be parsed correctly.
             return _parse_json_reply(result_str, "JSON.GET for key '" + key + "', path '" + path + "'");
@@ -348,7 +348,7 @@ bool RedisJSONClient::exists_path(const std::string& key, const std::string& pat
         _connection_manager->return_connection(std::move(conn));
         return true; // Path exists
     }
-
+    
     // Any other reply type is unexpected for JSON.TYPE
     _connection_manager->return_connection(std::move(conn));
     throw RedisCommandException("JSON.TYPE", "Key: " + key + ", Path: " + path + ", Error: Unexpected reply type from Redis: " + std::to_string(reply->type));
@@ -393,7 +393,7 @@ void RedisJSONClient::append_path(const std::string& key, const std::string& pat
         // Throwing an exception seems appropriate if the expectation is that the path should exist.
         throw PathNotFoundException(key, path, "Key or path does not exist, or path is not an array, for JSON.ARRAPPEND");
     }
-
+    
     if (reply->type == REDIS_REPLY_ARRAY) {
         // Expecting an array with one element, which is an integer (new length) or nil (path is not an array type).
         if (reply->elements == 1) {
@@ -470,7 +470,7 @@ void RedisJSONClient::prepend_path(const std::string& key, const std::string& pa
             }
         }
     }
-
+    
     _connection_manager->return_connection(std::move(conn));
     std::string reply_details = "Unexpected reply type: " + std::to_string(reply->type);
     if (reply->type == REDIS_REPLY_STRING) {
@@ -569,7 +569,7 @@ size_t RedisJSONClient::array_length(const std::string& key, const std::string& 
         }
         return static_cast<size_t>(length);
     }
-
+    
     // Handle case where it might return an array with one element (the length or nil)
     // This is how ReJSON 2.0+ handles it for single path.
     if (reply->type == REDIS_REPLY_ARRAY && reply->elements == 1) {
@@ -614,7 +614,7 @@ void RedisJSONClient::merge_json(const std::string& key, const json& patch,
 
     std::unique_ptr<RedisConnection> conn = get_redis_connection();
     std::string patch_str = patch.dump();
-
+    
     // JSON.MERGE <key> <path> <value>
     // We assume merging into the root of the document, so path is '$'.
     // The `patch` here is the JSON value to be merged in.
@@ -636,12 +636,12 @@ void RedisJSONClient::merge_json(const std::string& key, const json& patch,
     // It returns NIL if the key does not exist and the path is not '$' (older versions).
     // For path '$', if the key does not exist, JSON.MERGE will create it and set it to the patch value if patch is an object/array.
     // If the existing value or patch is not a JSON object, it might error or have specific behavior.
-
+    
     if (reply->type == REDIS_REPLY_STATUS && strcmp(reply->str, "OK") == 0) {
         _connection_manager->return_connection(std::move(conn));
         return; // Success
     }
-
+    
     // JSON.MERGE (on ReJSON < 2.0) could return an integer reply (0 or 1) indicating if a change was made.
     // ReJSON 2.0+ returns "OK". We will primarily check for "OK".
     // If older versions are supported, this might need adjustment.
@@ -838,7 +838,7 @@ std::vector<std::string> RedisJSONClient::keys_by_pattern(const std::string& pat
             }
             // Non-string elements in keys array would be strange, ignore or log.
         }
-
+        
         _connection_manager->return_connection(std::move(conn)); // Return connection after processing reply
 
     } while (cursor != "0");

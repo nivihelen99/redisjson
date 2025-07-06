@@ -213,7 +213,7 @@ TEST_F(RedisJSONClientTest, SetAndGetPath) {
     ASSERT_NO_THROW(retrieved_city_array = client->get_path(key, "$.address.city"));
     ASSERT_TRUE(retrieved_city_array.is_array() && retrieved_city_array.size() == 1);
     EXPECT_EQ(retrieved_city_array[0], new_city_value);
-
+    
     // Test getting a path that returns multiple values (e.g. wildcard, not directly tested here with simple path)
     // For a simple path like "$.name", JSON.GET returns an array of one element.
     json name_val_array;
