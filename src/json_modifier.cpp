@@ -116,7 +116,7 @@ json* JSONModifier::navigate_to_element(json& doc,
 
                 if (create_missing_paths) {
                     if (actual_index < 0) { // Still negative after adjustment (e.g. large negative index on small array)
-                        throw IndexOutOfBoundsException(el.index, current->size(), "Negative index still out of bounds after adjustment during creation.");
+                        throw IndexOutOfBoundsException("Index " + std::to_string(el.index) + " out of bounds for array size " + std::to_string(current->size()) + ". Negative index still out of bounds after adjustment during creation.");
                     }
                     if (static_cast<size_t>(actual_index) >= current->size()) {
                          while(current->size() <= static_cast<size_t>(actual_index)) {
@@ -273,7 +273,7 @@ void JSONModifier::set(json& document, const std::vector<PathParser::PathElement
             // or array was empty and index was negative.
             // navigate_to_parent should have thrown IndexOutOfBounds if it couldn't resolve to a valid effective index.
             // So, this path might indicate an issue or a very specific edge case with empty arrays + negative indices.
-            throw IndexOutOfBoundsException(std::get<int>(final_accessor), parent->size(), "Invalid negative index or internal error at final set stage.");
+            throw IndexOutOfBoundsException("Index " + std::to_string(std::get<int>(final_accessor)) + " out of bounds for array size " + std::to_string(parent->size()) + ". Invalid negative index or internal error at final set stage.");
         }
 
         if (static_cast<size_t>(index) < parent->size()) { // Index is within current bounds
@@ -284,7 +284,7 @@ void JSONModifier::set(json& document, const std::vector<PathParser::PathElement
             if (create_path) {
                 parent->push_back(value_to_set);
             } else {
-                 throw IndexOutOfBoundsException(std::get<int>(final_accessor), parent->size(), "Cannot append to array, create_path is false.");
+                 throw IndexOutOfBoundsException("Index " + std::to_string(std::get<int>(final_accessor)) + " out of bounds for array size " + std::to_string(parent->size()) + ". Cannot append to array, create_path is false.");
             }
         } else { // index > parent->size(), attempting to set out of bounds
             if (create_path) {
@@ -500,7 +500,7 @@ void JSONModifier::array_insert(json& document, const std::vector<PathParser::Pa
         if (index == -1) { // Special case: -1 often means "at the end" for insertion
             actual_index = arr_node->size();
         } else if (index < -1) { // Other negative indices are complex for insert.
-             throw IndexOutOfBoundsException(index, arr_node->size(), "General negative indices for insert not supported this way, use 0 or -1 (for end).");
+             throw IndexOutOfBoundsException("Index " + std::to_string(index) + " out of bounds for array size " + std::to_string(arr_node->size()) + ". General negative indices for insert not supported this way, use 0 or -1 (for end).");
         }
         // if index >=0, it's used as is.
     }
