@@ -132,5 +132,32 @@ public:
         : RedisJSONException("Index Out of Bounds: index " + std::to_string(index) + " on array of size " + std::to_string(array_size), ErrorCode::INDEX_OUT_OF_BOUNDS) {}
 };
 
+// -- General Argument/Usage Errors --
+class ArgumentInvalidException : public RedisJSONException {
+public:
+    explicit ArgumentInvalidException(const std::string& message)
+        : RedisJSONException("Invalid Argument: " + message) {} // Consider a specific ErrorCode if available
+};
+
+// -- Patch Specific Errors --
+class PatchFailedException : public RedisJSONException {
+public:
+    explicit PatchFailedException(const std::string& message)
+        : RedisJSONException("JSON Patch Failed: " + message) {} // Consider a specific ErrorCode
+};
+
+// -- Query Engine Specific Errors --
+class QueryException : public RedisJSONException {
+public:
+    explicit QueryException(const std::string& message)
+        : RedisJSONException("Query Execution Error: " + message) {} // Consider a specific ErrorCode
+};
+
+// -- Feature Not Implemented Errors --
+class NotImplementedException : public RedisJSONException {
+public:
+    explicit NotImplementedException(const std::string& message)
+        : RedisJSONException("Not Implemented: " + message) {} // Consider a specific ErrorCode
+};
 
 } // namespace redisjson
