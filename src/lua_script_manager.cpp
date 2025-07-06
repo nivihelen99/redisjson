@@ -74,6 +74,41 @@ const std::string LuaScriptManager::JSON_COMPARE_SET_LUA = R"lua(
     end
 )lua";
 
+const std::string LuaScriptManager::ATOMIC_JSON_GET_SET_PATH_LUA = R"lua(
+-- KEYS[1]: key
+-- ARGV[1]: path
+-- ARGV[2]: new_value (JSON string)
+local current_value_str = redis.call('JSON.GET', KEYS[1], ARGV[1])
+redis.call('JSON.SET', KEYS[1], ARGV[1], ARGV[2])
+return current_value_str
+)lua";
+
+const std::string LuaScriptManager::ATOMIC_JSON_COMPARE_SET_PATH_LUA = R"lua(
+-- KEYS[1]: key
+-- ARGV[1]: path
+-- ARGV[2]: expected_value (JSON string)
+-- ARGV[3]: new_value (JSON string)
+local current_value_lua_str = redis.call('JSON.GET', KEYS[1], ARGV[1])
+local expected_value_json_str = ARGV[2]
+-- If path does not exist, JSON.GET returns Lua boolean false.
+if current_value_lua_str == false then
+    -- If expected value is the JSON literal "null", treat non-existence as matching "null".
+    if expected_value_json_str == "null" then
+        redis.call('JSON.SET', KEYS[1], ARGV[1], ARGV[3])
+        return 1 -- Set succeeded
+    else
+        return 0 -- Path not found and expected was not "null"
+    end
+end
+-- Path exists, current_value_lua_str is a JSON string (e.g., "\"foo\"", "123", "{\"a\":1}", "null")
+if current_value_lua_str == expected_value_json_str then
+    redis.call('JSON.SET', KEYS[1], ARGV[1], ARGV[3])
+    return 1 -- Set succeeded
+else
+    return 0 -- Value did not match
+end
+)lua";
+
 
 // --- LuaScriptManager Implementation ---
 LuaScriptManager::LuaScriptManager(RedisConnectionManager* conn_manager)
@@ -269,11 +304,23 @@ json LuaScriptManager::execute_script(const std::string& name,
 void LuaScriptManager::preload_builtin_scripts() {
     // Example of preloading. In a real app, script bodies would be more robustly managed.
     try {
-        load_script("json_get_set", JSON_GET_SET_LUA);
-        load_script("json_compare_set", JSON_COMPARE_SET_LUA);
-        // ... load other built-in scripts ...
-        // load_script("json_merge.lua", JSON_MERGE_LUA);
-        // load_script("json_array_ops.lua", JSON_ARRAY_OPS_LUA);
+        // Load new scripts for RedisJSON path operations
+        load_script("atomic_json_get_set_path", ATOMIC_JSON_GET_SET_PATH_LUA);
+        load_script("atomic_json_compare_set_path", ATOMIC_JSON_COMPARE_SET_PATH_LUA);
+
+        // Reviewing old scripts:
+        // The old JSON_GET_SET_LUA and JSON_COMPARE_SET_LUA operate on full key GET/SET
+        // and assume Lua-side JSON parsing (cjson) for path-like operations.
+        // These might be useful for a generic Redis client but are less ideal for a RedisJSON specific client
+        // if path operations are intended to use RedisJSON's native path support.
+        // For now, I will comment them out from preloading to avoid confusion,
+        // unless they are explicitly needed for other functionalities not covered by current TODOs.
+        // load_script("json_get_set", JSON_GET_SET_LUA);
+        // load_script("json_compare_set", JSON_COMPARE_SET_LUA);
+        
+        // ... load other built-in scripts if any ...
+        // load_script("json_merge.lua", JSON_MERGE_LUA); // Example, if a Lua based merge was needed
+        // load_script("json_array_ops.lua", JSON_ARRAY_OPS_LUA); // Example
         // load_script("json_search.lua", JSON_SEARCH_LUA);
 
     } catch (const RedisJSONException& e) {
