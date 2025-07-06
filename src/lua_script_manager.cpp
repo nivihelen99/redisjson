@@ -1,5 +1,6 @@
 #include "redisjson++/lua_script_manager.h"
 #include "redisjson++/redis_connection_manager.h" // For RedisConnection
+#include "redisjson++/hiredis_RAII.h" // For RedisReplyPtr
 #include "redisjson++/exceptions.h" // For JsonParsingException, LuaScriptException
 #include <vector>
 #include <string>
