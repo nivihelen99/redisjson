@@ -473,33 +473,74 @@ LuaScriptManager::~LuaScriptManager() {
 }
 
 void LuaScriptManager::load_script(const std::string& name, const std::string& script_body) {
+    std::cout << "LOG: LuaScriptManager::load_script() - Entry for script name: '" << name << "'. Thread ID: " << std::this_thread::get_id() << std::endl;
     if (name.empty() || script_body.empty()) {
+        std::cout << "ERROR_LOG: LuaScriptManager::load_script() - Script name or body is empty. Name: '" << name << "'. Throwing." << std::endl;
         throw std::invalid_argument("Script name and body cannot be empty.");
     }
-    // Use RedisConnectionPtr which includes the custom deleter
+
+    std::cout << "LOG: LuaScriptManager::load_script() - Getting connection for SCRIPT LOAD '" << name << "'. Thread ID: " << std::this_thread::get_id() << std::endl;
     RedisConnectionManager::RedisConnectionPtr conn_guard = connection_manager_->get_connection();
     RedisConnection* conn = conn_guard.get();
+
     if (!conn || !conn->is_connected()) {
+        std::cout << "ERROR_LOG: LuaScriptManager::load_script() - Failed to get valid Redis connection for SCRIPT LOAD '" << name << "'. Conn is " << (conn ? "not null but not connected" : "null") << ". Throwing. Thread ID: " << std::this_thread::get_id() << std::endl;
+        // conn_guard will release connection if it's not null
         throw ConnectionException("Failed to get valid Redis connection for SCRIPT LOAD.");
     }
+    std::cout << "LOG: LuaScriptManager::load_script() - Got connection for SCRIPT LOAD '" << name << "'. Host: " << conn->get_host() << ":" << conn->get_port() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
+
+    std::cout << "LOG: LuaScriptManager::load_script() - Calling conn->command('SCRIPT LOAD ...') for script '" << name << "'. First 30 chars of body: " << script_body.substr(0, 30) << (script_body.length() > 30 ? "..." : "") << ". Thread ID: " << std::this_thread::get_id() << std::endl;
     RedisReplyPtr reply(static_cast<redisReply*>(conn->command("SCRIPT LOAD %s", script_body.c_str())));
-    if (!reply) {
-        throw RedisCommandException("SCRIPT LOAD", "No reply from Redis (connection error: " + (conn->get_context() ? std::string(conn->get_context()->errstr) : "unknown") + ")");
+
+    std::string error_context_for_throw;
+    if (conn && conn->get_context()) { // Check if conn and its context are valid
+        error_context_for_throw = " (hiredis context error: " + std::string(conn->get_context()->errstr ? conn->get_context()->errstr : "unknown") +
+                                  ", code: " + std::to_string(conn->get_context()->err) + ")";
+    } else if (conn) {
+        error_context_for_throw = " (hiredis context is null, connection might be bad)";
+    } else {
+        error_context_for_throw = " (RedisConnection object is null)";
     }
+
+
+    if (!reply) {
+        std::cout << "ERROR_LOG: LuaScriptManager::load_script() - conn->command('SCRIPT LOAD') for '" << name << "' returned null reply. Error context:" << error_context_for_throw << ". Throwing. Thread ID: " << std::this_thread::get_id() << std::endl;
+        // conn_guard will release connection
+        throw RedisCommandException("SCRIPT LOAD", "No reply from Redis for script '" + name + "'" + error_context_for_throw);
+    }
+    std::cout << "LOG: LuaScriptManager::load_script() - conn->command('SCRIPT LOAD') for '" << name << "' returned. Reply type: " << reply->type << ". Thread ID: " << std::this_thread::get_id() << std::endl;
+
     std::string sha1_hash;
     if (reply->type == REDIS_REPLY_STRING) {
         sha1_hash = std::string(reply->str, reply->len);
+        std::cout << "LOG: LuaScriptManager::load_script() - Script '" << name << "' loaded successfully. SHA1: " << sha1_hash << ". Thread ID: " << std::this_thread::get_id() << std::endl;
     } else if (reply->type == REDIS_REPLY_ERROR) {
-        std::string err_msg = std::string(reply->str, reply->len);
-        throw RedisCommandException("SCRIPT LOAD", err_msg);
+        std::string err_msg = (reply->str ? std::string(reply->str, reply->len) : "Unknown Redis error");
+        std::cout << "ERROR_LOG: LuaScriptManager::load_script() - SCRIPT LOAD for '" << name << "' failed with REDIS_REPLY_ERROR: " << err_msg << ". Throwing. Thread ID: " << std::this_thread::get_id() << std::endl;
+        // conn_guard will release connection
+        throw RedisCommandException("SCRIPT LOAD", "Error for script '" + name + "': " + err_msg);
     } else {
-        throw RedisCommandException("SCRIPT LOAD", "Unexpected reply type: " + std::to_string(reply->type));
+        std::cout << "ERROR_LOG: LuaScriptManager::load_script() - SCRIPT LOAD for '" << name << "' returned unexpected reply type: " << reply->type << ". Throwing. Thread ID: " << std::this_thread::get_id() << std::endl;
+        // conn_guard will release connection
+        throw RedisCommandException("SCRIPT LOAD", "Unexpected reply type for script '" + name + "': " + std::to_string(reply->type));
     }
+
     if (sha1_hash.empty()) {
-         throw RedisCommandException("SCRIPT LOAD", "Failed to load script, SHA1 hash is empty.");
+        std::cout << "ERROR_LOG: LuaScriptManager::load_script() - SCRIPT LOAD for '" << name << "' resulted in empty SHA1 hash. Throwing. Thread ID: " << std::this_thread::get_id() << std::endl;
+         // conn_guard will release connection
+         throw RedisCommandException("SCRIPT LOAD", "Failed to load script '" + name + "', SHA1 hash is empty.");
     }
-    std::lock_guard<std::mutex> lock(cache_mutex_);
-    script_shas_[name] = sha1_hash;
+
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        script_shas_[name] = sha1_hash;
+        std::cout << "LOG: LuaScriptManager::load_script() - Cached SHA1 for script '" << name << "'. Thread ID: " << std::this_thread::get_id() << std::endl;
+    }
+
+    // Connection is returned by RedisConnectionPtr conn_guard going out of scope.
+    // No explicit call to return_connection needed here for logging its return.
+    std::cout << "LOG: LuaScriptManager::load_script() - Exiting for script name: '" << name << "'. Connection will be returned by RAII. Thread ID: " << std::this_thread::get_id() << std::endl;
 }
 
 // Initialize the static map of script definitions
@@ -678,46 +719,43 @@ json LuaScriptManager::execute_script(const std::string& name,
 
 void LuaScriptManager::preload_builtin_scripts() {
     // Iterate over the SCRIPT_DEFINITIONS map to preload all defined scripts.
-    // This makes it easier to manage the list of scripts to preload.
-    std::cerr << "INFO: Starting preload of built-in Lua scripts." << std::endl;
+    std::cout << "LOG: LuaScriptManager::preload_builtin_scripts() - Entry. Thread ID: " << std::this_thread::get_id() << std::endl;
     int success_count = 0;
     int fail_count = 0;
+    int script_idx = 0;
 
     for (const auto& pair : SCRIPT_DEFINITIONS) {
+        script_idx++;
         const std::string& script_name = pair.first;
         const std::string* script_body = pair.second;
+        std::cout << "LOG: LuaScriptManager::preload_builtin_scripts() - Attempting to load script " << script_idx << "/" << SCRIPT_DEFINITIONS.size() << ": '" << script_name << "'. Thread ID: " << std::this_thread::get_id() << std::endl;
         try {
-            // std::cerr << "DEBUG: Attempting to preload script: " << script_name << std::endl;
             load_script(script_name, *script_body);
-            // std::cerr << "DEBUG: Successfully preloaded Lua script: " << script_name << std::endl;
+            std::cout << "LOG: LuaScriptManager::preload_builtin_scripts() - Successfully preloaded script: '" << script_name << "'. Thread ID: " << std::this_thread::get_id() << std::endl;
             success_count++;
         } catch (const RedisJSONException& e) {
             fail_count++;
-            std::cerr << "WARNING: Failed to preload Lua script '" << script_name << "' during initial preload: " << e.what()
-                      << ". Operations relying on this script may attempt on-demand load." << std::endl;
-            // Do not rethrow; allow other scripts to be preloaded.
-        } catch (const std::exception& e) { // Catch other potential standard exceptions
+            std::cout << "ERROR_LOG: LuaScriptManager::preload_builtin_scripts() - Failed to preload Lua script '" << script_name << "' (RedisJSONException): " << e.what() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
+        } catch (const std::exception& e) {
             fail_count++;
-            std::cerr << "WARNING: An unexpected C++ standard error occurred while preloading Lua script '" << script_name << "': " << e.what()
-                      << ". Operations relying on this script may attempt on-demand load." << std::endl;
+            std::cout << "ERROR_LOG: LuaScriptManager::preload_builtin_scripts() - Unexpected std::exception while preloading Lua script '" << script_name << "': " << e.what() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
         }
-        #ifndef NDEBUG // Or some other suitable debug flag
-        catch (...) { // Catch any other unknown exceptions during debug builds
+        #ifndef NDEBUG
+        catch (...) {
             fail_count++;
-            std::cerr << "WARNING: An unknown error occurred while preloading Lua script '" << script_name << "'."
-                      << ". Operations relying on this script may attempt on-demand load." << std::endl;
+            std::cout << "ERROR_LOG: LuaScriptManager::preload_builtin_scripts() - Unknown error while preloading Lua script '" << script_name << "'. Thread ID: " << std::this_thread::get_id() << std::endl;
         }
         #endif
+        std::cout << "LOG: LuaScriptManager::preload_builtin_scripts() - Finished attempt for script '" << script_name << "'. Thread ID: " << std::this_thread::get_id() << std::endl;
     }
 
     if (fail_count > 0) {
-        std::cerr << "WARNING: Preloading completed with " << fail_count << " script(s) failing to load (out of "
-                  << SCRIPT_DEFINITIONS.size() << " total)." << std::endl;
+        std::cout << "LOG: LuaScriptManager::preload_builtin_scripts() - Preloading completed. Success: " << success_count
+                  << ", Failed: " << fail_count << " (out of " << SCRIPT_DEFINITIONS.size() << " total). Thread ID: " << std::this_thread::get_id() << std::endl;
     } else {
-        std::cerr << "INFO: Successfully preloaded all " << success_count << " built-in Lua scripts." << std::endl;
+        std::cout << "LOG: LuaScriptManager::preload_builtin_scripts() - Successfully preloaded all " << success_count << " built-in Lua scripts. Thread ID: " << std::this_thread::get_id() << std::endl;
     }
-    // Do not throw from here, to allow client construction even if some preloads fail.
-    // The on-demand loading in execute_script will handle cases where a script is needed but failed to preload.
+    std::cout << "LOG: LuaScriptManager::preload_builtin_scripts() - Exit. Thread ID: " << std::this_thread::get_id() << std::endl;
 }
 
 bool LuaScriptManager::is_script_loaded(const std::string& name) const {
