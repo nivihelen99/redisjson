@@ -71,7 +71,11 @@ gtest_discover_tests(unit_tests)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/sample.cpp")
     add_executable(redisjson_sample_program examples/sample.cpp)
     target_link_libraries(redisjson_sample_program PRIVATE redisjson++)
+
     # With redisjson++ linking hiredis PUBLICly (now via system libs),
+
+    
+
     # redisjson_sample_program will also link to hiredis and get its includes correctly.
     message(STATUS "Added example program target: redisjson_sample_program")
 else()
