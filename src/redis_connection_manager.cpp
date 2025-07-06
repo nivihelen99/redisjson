@@ -478,47 +478,60 @@ void RedisConnectionManager::return_connection(RedisConnectionManager::RedisConn
 
     RedisConnection* conn_raw = conn_param_owner.get();
     bool repool_this_connection = false;
-    bool needs_notification = false;
+    // needs_notification is determined inside the lock
 
     {
         std::unique_lock<std::mutex> lock(pool_mutex_);
-        std::cout << "LOG: RedisConnectionManager::return_connection() - Acquired pool_mutex_. Active before dec: " << stats_.active_connections.load() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
-        stats_.active_connections--;
-        std::cout << "LOG: RedisConnectionManager::return_connection() - Active after dec: " << stats_.active_connections.load() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
+        std::cout << "LOG: RedisConnectionManager::return_connection() - Acquired pool_mutex_. Current stats: Active=" << stats_.active_connections.load()
+                  << ", Total=" << stats_.total_connections.load() << ", Idle=" << stats_.idle_connections.load()
+                  << ", PoolVecSize=" << pool_.size() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
 
+        bool actually_needs_notification = false;
 
-        if (shutting_down_) {
-            std::cout << "LOG: RedisConnectionManager::return_connection() - Shutting down. Disconnecting connection. Thread ID: " << std::this_thread::get_id() << std::endl;
+        if (shutting_down_.load()) {
+            std::cout << "LOG: RedisConnectionManager::return_connection() - Shutting down mode. Disconnecting raw connection. Thread ID: " << std::this_thread::get_id() << std::endl;
             conn_raw->disconnect();
-        } else if (conn_raw->is_connected() && pool_.size() < static_cast<size_t>(config_.connection_pool_size)) {
-            std::cout << "LOG: RedisConnectionManager::return_connection() - Connection is connected and pool has space (pool_v_sz=" << pool_.size() << ", config_pool_sz=" << config_.connection_pool_size << "). Repooling. Thread ID: " << std::this_thread::get_id() << std::endl;
-            repool_this_connection = true;
-            available_connections_.push(conn_raw);
-            pool_.push_back(std::move(conn_param_owner));
-            stats_.idle_connections++;
-            needs_notification = true;
+            repool_this_connection = false;
+            // Stats (active, total) are globally reset by close_all_connections. No individual decrements here.
+            // No notification from here as close_all_connections will notify once.
         } else {
-            std::cout << "LOG: RedisConnectionManager::return_connection() - Not repooling. Shutting down: " << shutting_down_.load()
-                      << ", Connected: " << conn_raw->is_connected()
-                      << ", Pool full? (pool_v_sz=" << pool_.size() << ", config_pool_sz=" << config_.connection_pool_size << ")"
-                      << ". Disconnecting. Thread ID: " << std::this_thread::get_id() << std::endl;
-            if (!conn_raw->is_connected() && !shutting_down_) {
-                stats_.connection_errors++;
-            }
-            conn_raw->disconnect();
-        }
-
-        if (!repool_this_connection) {
-            if (stats_.total_connections > 0) {
-                 stats_.total_connections--;
-                 needs_notification = true;
-                 std::cout << "LOG: RedisConnectionManager::return_connection() - Connection not repooled, decremented total_connections to " << stats_.total_connections.load() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
+            // Normal operation path
+            if (stats_.active_connections > 0) {
+                 stats_.active_connections--;
             } else {
-                 std::cout << "LOG: RedisConnectionManager::return_connection() - Connection not repooled, but total_connections already 0. Not decrementing. Thread ID: " << std::this_thread::get_id() << std::endl;
+                 // This might happen if a connection from health_check_loop's connections_to_remove_outside_lock
+                 // calls this via its deleter, and it was never made "active".
+                 std::cout << "WARNING_LOG: RedisConnectionManager::return_connection() - active_connections was already 0 or less during normal return. Active: " << stats_.active_connections.load() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
             }
-        }
+            std::cout << "LOG: RedisConnectionManager::return_connection() - Active after dec: " << stats_.active_connections.load() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
 
-        if (needs_notification) {
+            if (conn_raw->is_connected() && pool_.size() < static_cast<size_t>(config_.connection_pool_size)) {
+                std::cout << "LOG: RedisConnectionManager::return_connection() - Connection is connected and pool has space (pool_v_sz=" << pool_.size() << ", config_pool_sz=" << config_.connection_pool_size << "). Repooling. Thread ID: " << std::this_thread::get_id() << std::endl;
+                repool_this_connection = true;
+                available_connections_.push(conn_raw);
+                pool_.push_back(std::move(conn_param_owner));
+                stats_.idle_connections++;
+                actually_needs_notification = true;
+            } else {
+                std::cout << "LOG: RedisConnectionManager::return_connection() - Not repooling (normal ops). Connected: " << conn_raw->is_connected()
+                          << ", Pool full? (pool_v_sz=" << pool_.size() << ", config_pool_sz=" << config_.connection_pool_size << ")"
+                          << ". Disconnecting. Thread ID: " << std::this_thread::get_id() << std::endl;
+                if (!conn_raw->is_connected()) {
+                    stats_.connection_errors++;
+                }
+                conn_raw->disconnect();
+
+                if (stats_.total_connections > 0) {
+                    stats_.total_connections--;
+                    actually_needs_notification = true;
+                    std::cout << "LOG: RedisConnectionManager::return_connection() - Connection not repooled (normal ops), decremented total_connections to " << stats_.total_connections.load() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
+                } else {
+                    std::cout << "LOG: RedisConnectionManager::return_connection() - Connection not repooled (normal ops), but total_connections already 0. Not decrementing. Thread ID: " << std::this_thread::get_id() << std::endl;
+                }
+            }
+        } // End of !shutting_down_ block
+
+        if (actually_needs_notification) { // Only notify if not in overall shutdown and a change occurred
             std::cout << "LOG: RedisConnectionManager::return_connection() - Calling condition_.notify_one(). Thread ID: " << std::this_thread::get_id() << std::endl;
             condition_.notify_one();
         }
@@ -536,17 +549,47 @@ void RedisConnectionManager::return_connection(RedisConnectionManager::RedisConn
 }
 
 void RedisConnectionManager::close_all_connections() {
-    std::lock_guard<std::mutex> lock(pool_mutex_);
-    shutting_down_ = true; 
+    std::cout << "LOG: RedisConnectionManager::close_all_connections() - Entry. Thread ID: " << std::this_thread::get_id() << std::endl;
+    std::vector<RedisConnectionManager::RedisConnectionPtr> connections_to_destroy_outside_lock;
 
-    while (!available_connections_.empty()) {
-        available_connections_.pop();
-    }
-    pool_.clear(); 
-    stats_.active_connections = 0;
-    stats_.idle_connections = 0;
-    stats_.total_connections = 0; 
-    primary_healthy_ = false;
+    { // Start of critical section for modifying shared pool structures
+        std::lock_guard<std::mutex> lock(pool_mutex_);
+        std::cout << "LOG: RedisConnectionManager::close_all_connections() - Acquired pool_mutex_. Thread ID: " << std::this_thread::get_id() << std::endl;
+        shutting_down_ = true; // Ensure this is unequivocally set
+
+        // Move connections from the main pool to a temporary vector
+        if (!pool_.empty()) {
+            connections_to_destroy_outside_lock.swap(pool_);
+            std::cout << "LOG: RedisConnectionManager::close_all_connections() - Moved " << connections_to_destroy_outside_lock.size() << " connections from pool_ to temporary vector. pool_ is now empty. Thread ID: " << std::this_thread::get_id() << std::endl;
+        } else {
+            std::cout << "LOG: RedisConnectionManager::close_all_connections() - pool_ vector was already empty. Thread ID: " << std::this_thread::get_id() << std::endl;
+        }
+
+
+        // Clear the queue of available raw pointers
+        if (!available_connections_.empty()) {
+            std::queue<RedisConnection*> empty_queue;
+            std::swap(available_connections_, empty_queue);
+            std::cout << "LOG: RedisConnectionManager::close_all_connections() - Cleared available_connections_ queue. Thread ID: " << std::this_thread::get_id() << std::endl;
+        } else {
+            std::cout << "LOG: RedisConnectionManager::close_all_connections() - available_connections_ queue was already empty. Thread ID: " << std::this_thread::get_id() << std::endl;
+        }
+
+        // Reset statistics
+        stats_.active_connections = 0;
+        stats_.idle_connections = 0;
+        stats_.total_connections = 0;
+        primary_healthy_ = false;
+        std::cout << "LOG: RedisConnectionManager::close_all_connections() - Stats reset. Notifying any remaining waiters. Thread ID: " << std::this_thread::get_id() << std::endl;
+        condition_.notify_all();
+    } // Mutex is released here
+    std::cout << "LOG: RedisConnectionManager::close_all_connections() - Released pool_mutex_. Thread ID: " << std::this_thread::get_id() << std::endl;
+
+    std::cout << "LOG: RedisConnectionManager::close_all_connections() - Destroying " << connections_to_destroy_outside_lock.size() << " connections outside of lock. Thread ID: " << std::this_thread::get_id() << std::endl;
+    // Now, when connections_to_destroy_outside_lock is cleared (or goes out of scope),
+    // their deleters will call return_connection. return_connection will acquire pool_mutex_ (which is now free).
+    connections_to_destroy_outside_lock.clear();
+    std::cout << "LOG: RedisConnectionManager::close_all_connections() - Finished destroying connections. Exiting function. Thread ID: " << std::this_thread::get_id() << std::endl;
 }
 
 bool RedisConnectionManager::is_healthy() const {
