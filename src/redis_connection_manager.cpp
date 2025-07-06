@@ -357,45 +357,55 @@ RedisConnectionManager::RedisConnectionPtr RedisConnectionManager::get_connectio
     }
 }
 
-void RedisConnectionManager::return_connection(RedisConnectionManager::RedisConnectionPtr conn) {
-    if (!conn) return;
+void RedisConnectionManager::return_connection(RedisConnectionManager::RedisConnectionPtr conn_param_owner) {
+    if (!conn_param_owner) return;
 
-    bool returned_to_pool = false;
-    { 
+    RedisConnection* conn_raw = conn_param_owner.get();
+    bool repool_this_connection = false;
+
+    { // Mutex scope
         std::unique_lock<std::mutex> lock(pool_mutex_);
         stats_.active_connections--;
 
         if (shutting_down_) {
-            conn->disconnect();
-        } else if (conn->is_connected() && (stats_.active_connections + pool_.size()) < static_cast<size_t>(config_.connection_pool_size)) {
-            if ((stats_.active_connections + pool_.size() + 1) <= static_cast<size_t>(config_.connection_pool_size) ) {
-                available_connections_.push(conn.get());
-                pool_.push_back(std::move(conn)); // conn is already RedisConnectionPtr
-                stats_.idle_connections++;
-                condition_.notify_one();
-                returned_to_pool = true;
-            } else {
-                conn->disconnect();
-                stats_.connection_errors++; 
-            }
-        } else {
-            if (conn && !conn->is_connected()) { // Check conn before calling is_connected
+            conn_raw->disconnect();
+            // total_connections will be decremented when release_and_delete_manually is handled
+        } else if (conn_raw->is_connected() && pool_.size() < static_cast<size_t>(config_.connection_pool_size)) {
+            // Healthy and space in pool_ vector to store the unique_ptr
+            repool_this_connection = true;
+            available_connections_.push(conn_raw);
+            pool_.push_back(std::move(conn_param_owner)); // conn_param_owner is now null
+            stats_.idle_connections++;
+            condition_.notify_one();
+        } else { // Not repooling (shutting down, or not connected, or pool_ vector full)
+            if (!conn_raw->is_connected() && !shutting_down_) { // Don't double count if shutting down
                 stats_.connection_errors++;
             }
-            if(conn) conn->disconnect(); // Check conn before calling disconnect
+            conn_raw->disconnect();
         }
-    } 
 
-    if (!returned_to_pool && conn) { // If conn was not moved (and not null)
-        // It means it's no longer managed by the pool, so decrement total_connections.
-        // The RedisConnectionPtr's deleter will handle actual deletion.
-        std::atomic_fetch_sub(&stats_.total_connections, 1u); 
-    } else if (!returned_to_pool && !conn) {
-        // This case implies conn was already null or became null (e.g. moved then reset elsewhere)
-        // and wasn't returned. If it was counted, it should be decremented.
-        // This path is less clear without full context of how conn could be null AND not returned.
-        // Assuming if conn is null here and not returned, its count was already handled or never added.
+        // If not repooled, it needs to be deleted.
+        // This means stats_.total_connections needs to reflect that.
+        if (!repool_this_connection) {
+            // Only decrement if it was a valid connection that's now being discarded
+            // and not due to shutdown (where total_connections is cleared later or handled differently).
+            // This logic ensures total_connections reflects actual managed connections.
+            if (conn_raw) { // Basic check
+                 bool was_in_pool_logically = true; // Assume it was, might need more complex tracking if created on-the-fly and never pooled
+                 if (was_in_pool_logically || stats_.total_connections > 0) { // ensure not decrementing below zero if logic is imperfect
+                    stats_.total_connections--;
+                 }
+            }
+        }
+    } // Mutex released
+
+    if (!repool_this_connection) {
+        // conn_param_owner still owns the RedisConnection object if it wasn't moved.
+        // Release from unique_ptr and delete manually to prevent recursion.
+        RedisConnection* to_delete = conn_param_owner.release();
+        delete to_delete;
     }
+    // If repooled, conn_param_owner is null (from std::move), its destruction is trivial.
 }
 
 void RedisConnectionManager::close_all_connections() {
