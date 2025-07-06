@@ -9,11 +9,10 @@ namespace redisjson {
 
 using json = nlohmann::json;
 
+class RedisJSONClient; // Forward declaration
+
 class JSONQueryEngine {
 public:
-    // Forward declaration of RedisJSONClient to avoid circular dependency
-    class RedisJSONClient;
-
     explicit JSONQueryEngine(RedisJSONClient& client);
 
     // JSONPath Support
