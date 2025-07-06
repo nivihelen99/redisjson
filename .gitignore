@@ -1,0 +1,31 @@
+# CMake build output
+build/
+build-*/
+*.swp
+*.swo
+*~
+*.user
+*.suo
+*.ide
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.a
+*.so
+*.dylib
+compile_commands.json
+
+# GTest/GMock files that might be generated in source if not careful
+# Though ideally they are in the build directory
+gtest/
+gmock/
+
+# VS Code
+.vscode/
+
+# CLion
+.idea/
+
+# Backup files
+*.bak
