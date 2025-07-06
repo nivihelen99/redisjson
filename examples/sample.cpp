@@ -243,52 +243,120 @@ void run_atomic_operations(redisjson::RedisJSONClient& client) {
 
 
 int main() {
-    redisjson::ClientConfig config;
-    // Ensure your Redis server is running on localhost:6379
-    // config.host = "127.0.0.1";
-    // config.port = 6379;
-    // config.password = "your_redis_password_if_any";
+    // --- SWSS Mode Example ---
+    std::cout << "--- Running in SWSS Mode ---" << std::endl;
+    redisjson::SwssClientConfig swss_config;
+    // Typically in SONiC, DBConnector connects to a specific DB, e.g., APPL_DB.
+    // The DB number for APPL_DB is often 0, but using names is safer if DBConnector supports it.
+    // For this example, let's assume we want to use a database name.
+    // If your DBConnector primarily uses integer IDs, you'd initialize it differently.
+    swss_config.db_name = "APPL_DB"; // Or "STATE_DB", "CONFIG_DB", etc.
+                                     // Or an integer if DBConnector uses int: swss_config.db_id = 0;
+    swss_config.unix_socket_path = "/var/run/redis/redis.sock"; // Standard SONiC path
+    swss_config.operation_timeout_ms = 5000;
+    swss_config.wait_for_db = false; // Set to true if the client should wait for DB availability
 
-    // For GitHub Actions or CI, Redis might be on a different host or need a password.
-    // You can use environment variables to configure this.
-    const char* redis_host_env = std::getenv("REDIS_HOST");
-    if (redis_host_env) {
-        config.host = redis_host_env;
-    }
-    const char* redis_port_env = std::getenv("REDIS_PORT");
-    if (redis_port_env) {
-        try {
-            config.port = std::stoi(redis_port_env);
-        } catch (const std::exception& e) {
-            std::cerr << "Warning: Could not parse REDIS_PORT env variable '" << redis_port_env << "'. Using default." << std::endl;
-        }
-    }
-     const char* redis_password_env = std::getenv("REDIS_PASSWORD");
-    if (redis_password_env) {
-        config.password = redis_password_env;
-    }
-
-
-    std::cout << "Attempting to connect to Redis at " << config.host << ":" << config.port << std::endl;
+    std::cout << "Attempting to connect to SWSS DB: " << swss_config.db_name
+              << " via " << swss_config.unix_socket_path << std::endl;
 
     try {
-        redisjson::RedisJSONClient client(config);
-        std::cout << "RedisJSONClient initialized successfully." << std::endl;
+        redisjson::RedisJSONClient swss_client(swss_config);
+        std::cout << "RedisJSONClient (SWSS Mode) initialized successfully for DB: " << swss_config.db_name << std::endl;
 
-        run_document_operations(client);
-        run_path_operations(client);
-        run_array_operations(client);
-        run_atomic_operations(client); // Note: atomicity depends on Lua scripts
+        // Before running operations, it's good practice to flush the test DB if possible,
+        // or ensure keys are unique to avoid interference from previous runs.
+        // Note: DBConnector might not expose a flushdb() method directly.
+        // For a real SONiC app, you wouldn't typically flush APPL_DB.
+        // This is more for isolated testing.
+        // For this example, we'll rely on unique keys or manual cleanup.
 
-        print_header("Sample Program Finished");
+        run_document_operations(swss_client);
+        run_path_operations(swss_client); // Note: atomicity of path ops is lost in SWSS mode
+        run_array_operations(swss_client);  // Note: atomicity of array ops is lost in SWSS mode
+
+        // Rename atomic operations to reflect their non-atomic nature in SWSS mode.
+        // The functions in the client are already renamed to non_atomic_...
+        // The example function `run_atomic_operations` needs to call these.
+        // For clarity, we can rename the example function too or add comments.
+        print_header("Non-Atomic Operations (SWSS Mode - atomicity lost)");
+        // Create a temporary key for these non-atomic tests
+        std::string non_atomic_key = "sample:non_atomic:swss_counter";
+        swss_client.set_json(non_atomic_key, { {"value", 0}, {"version", 1} });
+        std::cout << "Setup: Initial non-atomic document set for key '" << non_atomic_key << "':\n"
+                  << swss_client.get_json(non_atomic_key).dump(2) << std::endl;
+        try {
+            json old_val = swss_client.non_atomic_get_set(non_atomic_key, "value", 100);
+            std::cout << "SUCCESS: NON_ATOMIC_GET_SET on 'value'. Old value: " << old_val.dump()
+                      << ", New value: " << swss_client.get_path(non_atomic_key, "value").dump() << std::endl;
+
+            bool cas_success = swss_client.non_atomic_compare_set(non_atomic_key, "version", 1, 20);
+             std::cout << "\nSUCCESS: NON_ATOMIC_COMPARE_SET on 'version' (expected 1, new 20). Success: "
+                      << (cas_success ? "true" : "false") << std::endl;
+            std::cout << "Current 'version': " << swss_client.get_path(non_atomic_key, "version").dump() << std::endl;
+
+        } catch (const redisjson::RedisJSONException& e) {
+            std::cerr << "ERROR: Non-atomic operation failed (SWSS): " << e.what() << std::endl;
+        }
+        swss_client.del_json(non_atomic_key);
+
+
+        print_header("SWSS Mode Sample Program Finished");
 
     } catch (const redisjson::ConnectionException& e) {
-        std::cerr << "CRITICAL: Could not connect to Redis. " << e.what() << std::endl;
-        std::cerr << "Please ensure Redis is running at " << config.host << ":" << config.port
-                  << " and is accessible." << std::endl;
-        if (!config.password.empty()) {
-             std::cerr << "Attempted to use a password." << std::endl;
+        std::cerr << "CRITICAL (SWSS): Could not connect to Redis DB '" << swss_config.db_name << "'. " << e.what() << std::endl;
+        std::cerr << "Please ensure Redis is running and accessible via " << swss_config.unix_socket_path
+                  << " and the DB name/ID is correct." << std::endl;
+        return 1;
+    } catch (const redisjson::RedisJSONException& e) {
+        std::cerr << "CRITICAL (SWSS): A RedisJSON++ error occurred: " << e.what() << std::endl;
+        return 1;
+    } catch (const std::exception& e) {
+        std::cerr << "CRITICAL (SWSS): A standard C++ exception occurred: " << e.what() << std::endl;
+        return 1;
+    }
+
+    std::cout << "\n\n--- Running in Legacy Mode (if configured) ---" << std::endl;
+    // --- Legacy Mode Example (original logic) ---
+    // This part would use LegacyClientConfig and connect directly to a Redis host/port.
+    // For CI/testing, this might still be useful.
+    // You would typically guard this with a compile-time or run-time flag.
+    bool run_legacy_example = false; // Set to true to run legacy example
+    const char* run_legacy_env = std::getenv("RUN_REDISJSON_LEGACY_EXAMPLE");
+    if (run_legacy_env && std::string(run_legacy_env) == "1") {
+        run_legacy_example = true;
+    }
+
+    if (run_legacy_example) {
+        redisjson::LegacyClientConfig legacy_config;
+        const char* redis_host_env = std::getenv("REDIS_HOST");
+        if (redis_host_env) legacy_config.host = redis_host_env;
+        const char* redis_port_env = std::getenv("REDIS_PORT");
+        if (redis_port_env) try { legacy_config.port = std::stoi(redis_port_env); } catch (...) {}
+        const char* redis_password_env = std::getenv("REDIS_PASSWORD");
+        if (redis_password_env) legacy_config.password = redis_password_env;
+
+        std::cout << "Attempting to connect to Legacy Redis at " << legacy_config.host << ":" << legacy_config.port << std::endl;
+        try {
+            redisjson::RedisJSONClient legacy_client(legacy_config);
+            std::cout << "RedisJSONClient (Legacy Mode) initialized successfully." << std::endl;
+
+            run_document_operations(legacy_client);
+            run_path_operations(legacy_client);
+            run_array_operations(legacy_client);
+            run_atomic_operations(legacy_client); // Original atomic operations using Lua
+
+            print_header("Legacy Mode Sample Program Finished");
+
+        } catch (const redisjson::ConnectionException& e) {
+            std::cerr << "CRITICAL (Legacy): Could not connect to Redis. " << e.what() << std::endl;
+        } catch (const redisjson::RedisJSONException& e) {
+            std::cerr << "CRITICAL (Legacy): A RedisJSON++ error occurred: " << e.what() << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "CRITICAL (Legacy): A standard C++ exception occurred: " << e.what() << std::endl;
         }
+    } else {
+        std::cout << "Legacy mode example skipped. Set RUN_REDISJSON_LEGACY_EXAMPLE=1 to run." << std::endl;
+    }
         return 1;
     } catch (const redisjson::RedisJSONException& e) {
         std::cerr << "CRITICAL: A RedisJSON++ error occurred: " << e.what() << std::endl;

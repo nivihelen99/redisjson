@@ -14,8 +14,8 @@ enum class SetCmdCondition {
     XX    // Set only if key already exists
 };
 
-// Configuration for the Redis client and connection manager
-struct ClientConfig {
+// Configuration for the Redis client when using direct Redis connection
+struct LegacyClientConfig {
     std::string host = "127.0.0.1";
     int port = 6379;
     std::string password; // Empty if no password
@@ -33,26 +33,39 @@ struct ClientConfig {
     // Retry strategy (basic example)
     int max_retries = 3;
     std::chrono::milliseconds retry_backoff_start = std::chrono::milliseconds(100);
-
-    // Add other configurations as needed:
-    // bool use_tls = false;
-    // std::string tls_ca_cert_path;
-    // std::string tls_client_cert_path;
-    // std::string tls_client_key_path;
-    // std::string sentinel_master_name;
-    // std::vector<std::pair<std::string, int>> sentinel_nodes;
 };
+
+// Configuration for the RedisJSONClient when used with SONiC SWSS
+struct SwssClientConfig {
+    // Name of the database to connect to (e.g., "APPL_DB", "STATE_DB", "CONFIG_DB")
+    // Or an integer DB ID if DBConnector supports that primarily.
+    std::string db_name;
+    // Timeout for database operations
+    unsigned int operation_timeout_ms = 5000;
+    // Path to the Redis Unix domain socket, typically fixed in SONiC.
+    // If empty, DBConnector might use a default or TCP. For SONiC, this should be set.
+    std::string unix_socket_path = "/var/run/redis/redis.sock";
+    // Whether DBConnector should wait for the database to be ready on connect.
+    bool wait_for_db = false;
+
+    // If all JSON documents are to be stored within a single Redis HASH (table),
+    // specify the table name here. If empty, JSON documents are stored as top-level keys.
+    // std::string default_table_name;
+};
+
 
 // Options for SET operations in RedisJSONClient
 struct SetOptions {
-    bool create_path = true;        // For path-specific operations (not used by current set_json)
-    bool overwrite = true;          // For Redis SET, this is implicit. For JSON specific ops, might differ.
-    std::chrono::seconds ttl = std::chrono::seconds(0); // TTL (0 = no expiry)
-    SetCmdCondition condition = SetCmdCondition::NONE; // Conditional set (NX, XX)
-    // bool compress = false;          // Future feature
-    // bool validate_schema = false;   // Future feature
-    // std::string schema_name = "";   // Future feature
-    // bool emit_events = true;        // Future feature
+    bool create_path = true;        // For path-specific operations (not used by current set_json with SWSS)
+                                    // When using SWSS, path operations are client-side get-modify-set.
+                                    // This option is less relevant for the SET command itself.
+    // bool overwrite = true;       // For Redis SET, this is implicit. SWSS set will overwrite.
+    std::chrono::seconds ttl = std::chrono::seconds(0); // TTL (0 = no expiry). SETEX will be used if > 0.
+    SetCmdCondition condition = SetCmdCondition::NONE; // Conditional set (NX, XX). SET key value NX/XX
 };
+
+// Keep ClientConfig as an alias for now for easier transition in examples,
+// but new code should prefer SwssClientConfig or LegacyClientConfig explicitly.
+using ClientConfig = LegacyClientConfig;
 
 } // namespace redisjson
