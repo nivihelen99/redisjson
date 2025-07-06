@@ -240,19 +240,28 @@ RedisConnectionManager::RedisConnectionPtr RedisConnectionManager::create_new_co
 void RedisConnectionManager::initialize_pool() {
     std::lock_guard<std::mutex> lock(pool_mutex_);
     for (int i = 0; i < config_.connection_pool_size; ++i) {
-        // Use create_new_connection_ptr
-        RedisConnectionManager::RedisConnectionPtr conn = create_new_connection_ptr(config_.host, config_.port);
-        if (conn && conn->is_connected()) { // Check if conn is not null before calling is_connected
-            available_connections_.push(conn.get()); // Store raw pointer for queue
-            pool_.push_back(std::move(conn)); // Move RedisConnectionPtr into pool
+        RedisConnection* conn_raw = new RedisConnection(config_.host, config_.port, config_.password, config_.database, config_.timeout);
+        bool connected_successfully = false;
+
+        if (conn_raw) { // Check if allocation succeeded
+            connected_successfully = conn_raw->connect();
+        }
+
+        if (connected_successfully) {
+            RedisConnectionManager::RedisConnectionPtr conn(conn_raw, RedisConnectionDeleter(this));
+            available_connections_.push(conn.get());
+            pool_.push_back(std::move(conn));
             stats_.idle_connections++;
-            if (i == 0) primary_healthy_ = true;
+            stats_.total_connections++; // Increment for successfully created and pooled connections
+            if (pool_.size() == 1 && i == 0) primary_healthy_ = true; // If it's the first potential primary and successfully pooled
         } else {
             stats_.connection_errors++;
-            if (i == 0) primary_healthy_ = false;
-            // conn (RedisConnectionPtr) will auto-delete if not moved, or handle via deleter if moved and bad
+            if (conn_raw) {
+                delete conn_raw; // Directly delete failed connection
+            }
+            if (i == 0) primary_healthy_ = false; // If the first attempt failed
+            // Do not increment total_connections for connections that failed to initialize
         }
-        stats_.total_connections++; // Count attempted/created connections
     }
 }
 
