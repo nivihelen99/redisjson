@@ -497,7 +497,7 @@ void RedisConnectionManager::health_check_loop() {
                     connections_to_remove_outside_lock.push_back(std::move(*it));
                     it = pool_.erase(it); // Erase the (now empty) unique_ptr from pool_ vector.
                                           // This does not call the deleter of the connection itself yet.
-                    stats_.total_connections--; // Decrement total connections count.
+                    // total_connections will be decremented by return_connection when the object is finally destroyed.
                 } else {
                     ++it; 
                 }
