@@ -178,6 +178,200 @@ TEST_F(RedisJSONClientTest, GetMalformedJson) {
     ASSERT_THROW(client->get_json(key), redisjson::JsonParsingException);
 }
 
+
+// --- Path Operations Tests ---
+TEST_F(RedisJSONClientTest, SetAndGetPath) {
+    if (!client) GTEST_SKIP() << "Client not initialized, skipping test.";
+    const std::string key = test_prefix + "path_doc1";
+    json initial_doc = {
+        {"name", "Alice"},
+        {"age", 30},
+        {"address", {
+            {"street", "123 Main St"},
+            {"city", "Wonderland"}
+        }},
+        {"tags", json::array({"friendly", "coder"})}
+    };
+    client->set_json(key, initial_doc);
+
+    // Test setting a new scalar value
+    json new_age = 31;
+    ASSERT_NO_THROW(client->set_path(key, "$.age", new_age));
+    json retrieved_age_array; // JSON.GET path returns an array with the single value
+    ASSERT_NO_THROW(retrieved_age_array = client->get_path(key, "$.age"));
+    ASSERT_TRUE(retrieved_age_array.is_array() && retrieved_age_array.size() == 1);
+    EXPECT_EQ(retrieved_age_array[0], new_age);
+
+    // Test setting a new object value
+    json new_city = {{"city", "New Wonderland"}}; // Note: JSON.SET path value replaces the target.
+                                               // So this replaces the string "Wonderland" with object {"city": "New Wonderland"}
+                                               // This is probably not what one intends for $.address.city.
+                                               // The value for path should be the actual value, not an object containing it.
+    json new_city_value = "New Wonderland";
+    ASSERT_NO_THROW(client->set_path(key, "$.address.city", new_city_value));
+    json retrieved_city_array;
+    ASSERT_NO_THROW(retrieved_city_array = client->get_path(key, "$.address.city"));
+    ASSERT_TRUE(retrieved_city_array.is_array() && retrieved_city_array.size() == 1);
+    EXPECT_EQ(retrieved_city_array[0], new_city_value);
+
+    // Test getting a path that returns multiple values (e.g. wildcard, not directly tested here with simple path)
+    // For a simple path like "$.name", JSON.GET returns an array of one element.
+    json name_val_array;
+    ASSERT_NO_THROW(name_val_array = client->get_path(key, "$.name"));
+    ASSERT_TRUE(name_val_array.is_array() && name_val_array.size() == 1);
+    EXPECT_EQ(name_val_array[0], "Alice");
+
+    // Test getting a non-existent path
+    ASSERT_THROW(client->get_path(key, "$.nonexistent"), redisjson::PathNotFoundException);
+
+    // Test set_path with NX (should succeed as path $.newfield does not exist)
+    redisjson::SetOptions opts_nx;
+    opts_nx.condition = redisjson::SetCondition::NX;
+    json new_field_val = "new value";
+    ASSERT_NO_THROW(client->set_path(key, "$.newfield", new_field_val, opts_nx));
+    json new_field_ret_array;
+    ASSERT_NO_THROW(new_field_ret_array = client->get_path(key, "$.newfield"));
+    ASSERT_TRUE(new_field_ret_array.is_array() && new_field_ret_array.size() == 1);
+    EXPECT_EQ(new_field_ret_array[0], new_field_val);
+
+    // Test set_path with NX (should do nothing as path $.newfield now exists)
+    json newer_field_val = "newer value";
+    ASSERT_NO_THROW(client->set_path(key, "$.newfield", newer_field_val, opts_nx)); // Should not throw, but also not update.
+    ASSERT_NO_THROW(new_field_ret_array = client->get_path(key, "$.newfield"));
+    ASSERT_TRUE(new_field_ret_array.is_array() && new_field_ret_array.size() == 1);
+    EXPECT_EQ(new_field_ret_array[0], new_field_val); // Check it's still the old value
+
+    // Test set_path with XX (should succeed as path $.newfield exists)
+    redisjson::SetOptions opts_xx;
+    opts_xx.condition = redisjson::SetCondition::XX;
+    ASSERT_NO_THROW(client->set_path(key, "$.newfield", newer_field_val, opts_xx));
+    ASSERT_NO_THROW(new_field_ret_array = client->get_path(key, "$.newfield"));
+    ASSERT_TRUE(new_field_ret_array.is_array() && new_field_ret_array.size() == 1);
+    EXPECT_EQ(new_field_ret_array[0], newer_field_val); // Check it's the new value
+
+    // Test set_path with XX (should do nothing as path $.anotherNew does not exist)
+    json another_new_val = "another";
+    ASSERT_NO_THROW(client->set_path(key, "$.anotherNew", another_new_val, opts_xx));
+    ASSERT_THROW(client->get_path(key, "$.anotherNew"), redisjson::PathNotFoundException); // Verify it wasn't created
+}
+
+TEST_F(RedisJSONClientTest, DelAndExistsPath) {
+    if (!client) GTEST_SKIP() << "Client not initialized, skipping test.";
+    const std::string key = test_prefix + "path_doc2";
+    json doc = {
+        {"user", {
+            {"name", "Bob"},
+            {"status", "active"}
+        }},
+        {"item", "test_item"}
+    };
+    client->set_json(key, doc);
+
+    // Check initial existence
+    bool p_exists = false;
+    ASSERT_NO_THROW(p_exists = client->exists_path(key, "$.user.status"));
+    EXPECT_TRUE(p_exists);
+    ASSERT_NO_THROW(p_exists = client->exists_path(key, "$.item"));
+    EXPECT_TRUE(p_exists);
+    ASSERT_NO_THROW(p_exists = client->exists_path(key, "$.user.nonexistent"));
+    EXPECT_FALSE(p_exists);
+    ASSERT_NO_THROW(p_exists = client->exists_path(key, "$.non_root_path")); // Path on non-existent root
+    EXPECT_FALSE(p_exists);
+
+
+    // Delete path $.user.status
+    ASSERT_NO_THROW(client->del_path(key, "$.user.status"));
+    ASSERT_NO_THROW(p_exists = client->exists_path(key, "$.user.status"));
+    EXPECT_FALSE(p_exists);
+    ASSERT_THROW(client->get_path(key, "$.user.status"), redisjson::PathNotFoundException); // Verify get fails
+
+    // Check other paths still exist
+    ASSERT_NO_THROW(p_exists = client->exists_path(key, "$.user.name"));
+    EXPECT_TRUE(p_exists);
+    json name_val_array;
+    ASSERT_NO_THROW(name_val_array = client->get_path(key, "$.user.name"));
+    ASSERT_TRUE(name_val_array.is_array() && name_val_array.size() == 1);
+    EXPECT_EQ(name_val_array[0], "Bob");
+
+
+    // Delete a root path $.item
+    ASSERT_NO_THROW(client->del_path(key, "$.item"));
+    ASSERT_NO_THROW(p_exists = client->exists_path(key, "$.item"));
+    EXPECT_FALSE(p_exists);
+
+    // Delete non-existent path (should not throw)
+    ASSERT_NO_THROW(client->del_path(key, "$.nonexistent.path"));
+
+    // Delete path on non-existent key (should not throw error, but DEL returns 0)
+    ASSERT_NO_THROW(client->del_path("nonexistent_key_for_del_path", "$.some.path"));
+}
+
+
+// --- Array Operations Tests ---
+TEST_F(RedisJSONClientTest, ArrayOperations) {
+    if (!client) GTEST_SKIP() << "Client not initialized, skipping test.";
+    const std::string key = test_prefix + "array_doc1";
+    json initial_doc = { {"my_array", {1, 2, 3}} };
+    client->set_json(key, initial_doc);
+
+    // Length
+    size_t len = 0;
+    ASSERT_NO_THROW(len = client->array_length(key, "$.my_array"));
+    EXPECT_EQ(len, 3);
+
+    // Append
+    ASSERT_NO_THROW(client->append_path(key, "$.my_array", 4)); // Append single value
+    ASSERT_NO_THROW(len = client->array_length(key, "$.my_array"));
+    EXPECT_EQ(len, 4);
+    json arr_val_array;
+    ASSERT_NO_THROW(arr_val_array = client->get_path(key, "$.my_array")); // $.my_array returns [ [1,2,3,4] ]
+    ASSERT_TRUE(arr_val_array.is_array() && arr_val_array.size() == 1);
+    EXPECT_EQ(arr_val_array[0], json({1,2,3,4}));
+
+
+    // Prepend
+    ASSERT_NO_THROW(client->prepend_path(key, "$.my_array", 0)); // Prepend single value
+    ASSERT_NO_THROW(len = client->array_length(key, "$.my_array"));
+    EXPECT_EQ(len, 5);
+    ASSERT_NO_THROW(arr_val_array = client->get_path(key, "$.my_array"));
+    ASSERT_TRUE(arr_val_array.is_array() && arr_val_array.size() == 1);
+    EXPECT_EQ(arr_val_array[0], json({0,1,2,3,4}));
+
+    // Pop from back (default index -1)
+    json popped_val;
+    ASSERT_NO_THROW(popped_val = client->pop_path(key, "$.my_array")); // Default index -1
+    EXPECT_EQ(popped_val, 4);
+    ASSERT_NO_THROW(len = client->array_length(key, "$.my_array"));
+    EXPECT_EQ(len, 4);
+    ASSERT_NO_THROW(arr_val_array = client->get_path(key, "$.my_array"));
+    ASSERT_TRUE(arr_val_array.is_array() && arr_val_array.size() == 1);
+    EXPECT_EQ(arr_val_array[0], json({0,1,2,3}));
+
+
+    // Pop from front (index 0)
+    ASSERT_NO_THROW(popped_val = client->pop_path(key, "$.my_array", 0));
+    EXPECT_EQ(popped_val, 0);
+    ASSERT_NO_THROW(len = client->array_length(key, "$.my_array"));
+    EXPECT_EQ(len, 3);
+
+    // Pop from middle (index 1, which is value 2)
+    ASSERT_NO_THROW(client->set_path(key, "$.my_array", json({10,20,30,40}))); // Reset array
+    ASSERT_NO_THROW(popped_val = client->pop_path(key, "$.my_array", 1));
+    EXPECT_EQ(popped_val, 20);
+    ASSERT_NO_THROW(arr_val_array = client->get_path(key, "$.my_array"));
+    ASSERT_TRUE(arr_val_array.is_array() && arr_val_array.size() == 1);
+    EXPECT_EQ(arr_val_array[0], json({10,30,40}));
+
+
+    // Error cases
+    ASSERT_THROW(client->array_length(key, "$.non_array_path"), redisjson::PathNotFoundException); // Path not an array or not found
+    client->set_json(key, {{"not_an_array", 123}});
+    ASSERT_THROW(client->append_path(key, "$.not_an_array", 5), redisjson::RedisCommandException); // Path not an array
+    ASSERT_THROW(client->array_length(key, "$.not_an_array"), redisjson::PathNotFoundException); // Path not an array for length check
+    ASSERT_THROW(client->pop_path(key, "$.not_an_array",0), redisjson::RedisCommandException); // Path not an array for pop
+}
+
+
 // This main is not strictly needed if CMake handles gtest_discover_tests and links GTest::gtest_main
 // However, it's common to include it.
 // int main(int argc, char **argv) {
