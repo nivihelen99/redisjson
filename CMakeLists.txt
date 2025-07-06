@@ -54,15 +54,21 @@ endif()
 
 # Enable testing with GoogleTest
 enable_testing()
-# find_package(GTest CONFIG REQUIRED) # Modern CMake way to find GTest
-add_subdirectory(/usr/src/googletest ${CMAKE_BINARY_DIR}/googletest EXCLUDE_FROM_ALL) # Build GTest from source
+include(FetchContent)
+FetchContent_Declare(
+  googletest
+  GIT_REPOSITORY https://github.com/google/googletest.git
+  GIT_TAG release-1.12.1 # Or a more recent stable tag
+)
+# For Windows: Prevent overriding the parent project's compiler/linker settings
+set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(googletest)
 
 # Test files
 file(GLOB_RECURSE TEST_SOURCES "tests/*.cpp")
 
 add_executable(unit_tests ${TEST_SOURCES})
-target_link_libraries(unit_tests PRIVATE redisjson++ gtest_main gmock) # Link against the compiled GTest/GMock targets
-# For older GTest, might be GTest::GTest GTest::Main
+target_link_libraries(unit_tests PRIVATE redisjson++ GTest::gtest_main GTest::gmock) # Modern GTest targets
 
 # Add test to CTest
 include(GoogleTest)
