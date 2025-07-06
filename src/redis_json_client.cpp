@@ -727,7 +727,7 @@ json RedisJSONClient::non_atomic_get_set(const std::string& key, const std::stri
 
     } else { // Legacy mode (atomic via Lua)
         if (!_lua_script_manager) throw RedisJSONException("LuaScriptManager not initialized.");
-        const std::string script_name = "atomic_json_get_set_path";
+        const std::string script_name = "json_get_set";
         std::vector<std::string> keys = {key};
         std::vector<std::string> args = {path_str, new_value.dump()};
         try {
@@ -774,7 +774,7 @@ bool RedisJSONClient::non_atomic_compare_set(const std::string& key, const std::
 
     } else { // Legacy
         if (!_lua_script_manager) throw RedisJSONException("LuaScriptManager not initialized.");
-        const std::string script_name = "atomic_json_compare_set_path";
+        const std::string script_name = "json_compare_set";
         std::vector<std::string> keys = {key};
         std::vector<std::string> args = {path_str, expected_val.dump(), new_val.dump()};
         try {
