@@ -53,6 +53,10 @@ public:
     bool ping(); 
     const std::string& get_last_error() const { return last_error_message_; }
 
+    // Accessors for host and port for logging/identification
+    const std::string& get_host() const { return host_; }
+    int get_port() const { return port_; }
+
 private:
     std::string host_;
     int port_;

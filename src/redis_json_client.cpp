@@ -2,7 +2,10 @@
 #include "redisjson++/hiredis_RAII.h" // For RedisReplyPtr
 #include "redisjson++/exceptions.h" // Added to include exception definitions
 #include <stdexcept>
-#include <string> // Required for std::to_string with some compilers/setups
+#include <string>    // Required for std::to_string with some compilers/setups
+#include <iostream>  // For std::cout (logging)
+#include <thread>    // For std::this_thread::get_id (logging)
+#include <cstring>   // For strcmp in set_json
 
 // For PathParser, JSONModifier, LuaScriptManager - include their headers once they exist
 // For now, we might not be able to fully initialize them if their constructors are complex.

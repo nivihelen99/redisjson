@@ -5,7 +5,9 @@
 #include <vector>
 #include <string>
 #include <algorithm> // For std::all_of
-#include <cstring> // For strncmp
+#include <cstring>   // For strncmp
+#include <iostream>  // For std::cout, std::cerr (logging)
+#include <thread>    // For std::this_thread::get_id (logging)
 
 namespace redisjson {
 

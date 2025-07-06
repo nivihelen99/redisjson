@@ -4,6 +4,8 @@
 #include <cstdarg>   // For va_list, va_start, va_end
 #include <cstring>   // For strcmp
 #include <algorithm> // For std::find_if
+#include <iostream>  // For std::cout (logging)
+// <thread> is included via redis_connection_manager.h for std::this_thread::get_id
 
 namespace redisjson {
 
