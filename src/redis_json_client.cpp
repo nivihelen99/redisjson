@@ -9,15 +9,15 @@
 namespace redisjson {
 
 RedisJSONClient::RedisJSONClient(const ClientConfig& client_config)
-    : config_(client_config) {
-    connection_manager_ = std::make_unique<RedisConnectionManager>(config_);
+    : _config(client_config) {
+    _connection_manager = std::make_unique<RedisConnectionManager>(_config);
 
     // Initialize other managers - for now, assume default constructors or simple ones
     // Once these classes are defined, their proper initialization will occur here.
-    path_parser_ = std::make_unique<PathParser>();
-    json_modifier_ = std::make_unique<JSONModifier>();
+    _path_parser = std::make_unique<PathParser>();
+    _json_modifier = std::make_unique<JSONModifier>();
     // LuaScriptManager constructor expects RedisConnectionManager*
-    lua_script_manager_ = std::make_unique<LuaScriptManager>(connection_manager_.get());
+    _lua_script_manager = std::make_unique<LuaScriptManager>(_connection_manager.get());
     // Consider calling lua_script_manager_->preload_builtin_scripts(); here if appropriate
     // For now, user might need to call it explicitly or it's done lazily.
 }
@@ -29,7 +29,7 @@ RedisJSONClient::~RedisJSONClient() {
 
 std::unique_ptr<RedisConnection> RedisJSONClient::get_redis_connection() const {
     try {
-        return connection_manager_->get_connection();
+        return _connection_manager->get_connection();
     } catch (const ConnectionException& e) {
         // Log error or rethrow as a more specific client error if desired
         throw; // Rethrow for now
@@ -55,16 +55,16 @@ void RedisJSONClient::set_json(const std::string& key, const json& document, con
     }
 
     if (!reply || reply->type == REDIS_REPLY_ERROR) {
-        connection_manager_->return_connection(std::move(conn)); // Return connection before throwing
+        _connection_manager->return_connection(std::move(conn)); // Return connection before throwing
         throw RedisCommandException("SET", "Key: " + key + ", Error: " + (reply ? (reply->str ? reply->str : "Reply object exists but str is null") : "No reply or connection error"));
     }
     // Check reply status for SET, should be "OK"
     if (reply->type == REDIS_REPLY_STATUS && strcmp(reply->str, "OK") != 0) {
-        connection_manager_->return_connection(std::move(conn));
+        _connection_manager->return_connection(std::move(conn));
         throw RedisCommandException("SET", "Key: " + key + ", SET command did not return OK: " + std::string(reply->str));
     }
 
-    connection_manager_->return_connection(std::move(conn));
+    _connection_manager->return_connection(std::move(conn));
 }
 
 json RedisJSONClient::get_json(const std::string& key) const {
@@ -75,24 +75,24 @@ json RedisJSONClient::get_json(const std::string& key) const {
     ));
 
     if (!reply) { // Covers null reply from command() itself (e.g. connection broken before command sent)
-        connection_manager_->return_connection(std::move(conn));
+        _connection_manager->return_connection(std::move(conn));
         throw RedisCommandException("GET", "Key: " + key + ", Error: No reply or connection error");
     }
 
     if (reply->type == REDIS_REPLY_ERROR) {
-        connection_manager_->return_connection(std::move(conn));
+        _connection_manager->return_connection(std::move(conn));
         throw RedisCommandException("GET", "Key: " + key + ", Error: " + (reply->str ? reply->str : "Redis error reply with no message"));
     }
 
     if (reply->type == REDIS_REPLY_NIL) {
-        connection_manager_->return_connection(std::move(conn));
+        _connection_manager->return_connection(std::move(conn));
         // Using PathNotFoundException as KeyNotFoundException is not standard in exceptions.h
         throw PathNotFoundException(key, "$ (root)");
     }
 
     if (reply->type == REDIS_REPLY_STRING) {
         std::string doc_str = reply->str;
-        connection_manager_->return_connection(std::move(conn));
+        _connection_manager->return_connection(std::move(conn));
         try {
             return json::parse(doc_str);
         } catch (const json::parse_error& e) {
@@ -102,7 +102,7 @@ json RedisJSONClient::get_json(const std::string& key) const {
     }
 
     // Should not reach here with a valid Redis GET reply structure
-    connection_manager_->return_connection(std::move(conn));
+    _connection_manager->return_connection(std::move(conn));
     // This path indicates a logic error or unexpected server behavior.
     // Return a default-constructed json or throw a more specific internal error.
     // For now, let's throw, consistent with other error handling.
@@ -117,11 +117,11 @@ bool RedisJSONClient::exists_json(const std::string& key) const {
     ));
 
     if (!reply || reply->type == REDIS_REPLY_ERROR) {
-        connection_manager_->return_connection(std::move(conn));
+        _connection_manager->return_connection(std::move(conn));
         throw RedisCommandException("EXISTS", "Key: " + key + ", Error: " + (reply ? (reply->str ? reply->str : "Reply object exists but str is null") : "No reply or connection error"));
     }
 
-    connection_manager_->return_connection(std::move(conn));
+    _connection_manager->return_connection(std::move(conn));
     return (reply->type == REDIS_REPLY_INTEGER && reply->integer == 1);
 }
 
@@ -133,13 +133,13 @@ void RedisJSONClient::del_json(const std::string& key) {
     ));
 
     if (!reply || reply->type == REDIS_REPLY_ERROR) {
-        connection_manager_->return_connection(std::move(conn));
+        _connection_manager->return_connection(std::move(conn));
         throw RedisCommandException("DEL", "Key: " + key + ", Error: " + (reply ? (reply->str ? reply->str : "Reply object exists but str is null") : "No reply or connection error"));
     }
     // DEL returns number of keys deleted. We don't strictly need to check it for success
     // unless we want to confirm it was > 0 for an "effective" delete.
     // For now, no error from Redis is success.
-    connection_manager_->return_connection(std::move(conn));
+    _connection_manager->return_connection(std::move(conn));
 }
 
 } // namespace redisjson
