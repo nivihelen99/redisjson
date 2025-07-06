@@ -42,7 +42,7 @@ RedisJSONClient::~RedisJSONClient() {
     // If LuaScriptManager or others have explicit shutdown needs, call them here.
 }
 
-std::unique_ptr<RedisConnection> RedisJSONClient::get_redis_connection() const {
+RedisConnectionManager::RedisConnectionPtr RedisJSONClient::get_redis_connection() const {
     try {
         return _connection_manager->get_connection();
     } catch (const ConnectionException& e) {
