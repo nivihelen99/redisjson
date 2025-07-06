@@ -97,51 +97,28 @@ public:
         RedisConnectionDeleter(RedisConnectionManager* manager = nullptr) : manager_ptr_(manager) {}
 
         void operator()(RedisConnection* conn_ptr) const {
+            // If manager_ptr_ is set, this RedisConnectionPtr was obtained from the manager
+            // and should be returned to the manager's pool when it goes out of scope.
+            // The manager's return_connection method will then decide whether to pool it
+            // or delete it (e.g., if the manager is shutting down or the connection is invalid).
             if (manager_ptr_ && conn_ptr) {
-                // This was changed to expect RedisConnectionPtr
-                // However, the raw pointer is passed to the deleter.
-                // The responsibility of returning to pool is complex if deleter itself tries to call return_connection
-                // with a new unique_ptr. Simpler: just delete if manager_ptr_ is null, otherwise do nothing
-                // as return_connection (which now takes RedisConnectionPtr) should be the one putting it back.
-                // For now, let's assume the manager handles the return, and deleter just deletes if no manager.
-                // This part of logic might need further review based on how RedisConnectionPtr is used.
-                // If a RedisConnectionPtr goes out of scope, its deleter is called.
-                // If it was obtained from get_connection, it should have been returned via return_connection.
-                // If return_connection then moves it to pool_, the deleter on the original ptr shouldn't re-delete.
-                // This implies that return_connection should ideally take ownership and potentially reset the original ptr
-                // or the pool should store raw pointers if the manager exclusively owns them.
-                // Given the current structure with unique_ptr in pool, this is tricky.
-                // Let's revert to the original idea: if manager_ptr is set, it means the connection *might* be from pool.
-                // The original logic was manager_ptr_->return_connection(RedisConnectionPtr(conn_ptr));
-                // which is problematic if conn_ptr is already managed by the unique_ptr whose deleter this is.
-                // Safest for now: if manager_ptr is null, delete. Otherwise, assume manager handles it.
-                // This implies connections taken from pool and not explicitly returned might leak if not handled.
-                // This is a common unique_ptr with custom deleter challenge.
-                // Let's stick to the idea that the deleter's job is primarily to delete if the object
-                // is not meant to be returned to a pool, or if the pool itself is being destroyed.
-                // The current design: get_connection() returns a RedisConnectionPtr.
-                // When this ptr goes out of scope, this deleter is called.
-                // If the user hasn't called return_connection(), the connection should be closed and deleted.
-                // If they *have* called return_connection(), then that function took ownership (moved it into pool_),
-                // so the original ptr should be null or its deleter shouldn't try to return/delete again.
-                // This suggests the manager_ptr_ in deleter might be for a different purpose or needs rethinking.
-
-                // Revised logic for deleter:
-                // If the connection is still valid and a manager exists,
-                // it implies the unique_ptr is being destroyed without being returned to the pool.
-                // In this case, we should probably just ensure it's disconnected and deleted.
-                // The manager's return_connection is for explicitly giving it back.
-                if (conn_ptr) { // Check if conn_ptr is not null
-                     // If manager_ptr_ is set, it suggests it *could* have been from the pool.
-                     // However, if this deleter is called, it means the unique_ptr owning conn_ptr is dying.
-                     // If it wasn't returned, it's now "orphaned" from the pool's perspective.
-                     // So, just delete it. The pool manages its own unique_ptrs.
-                    delete conn_ptr;
-                }
-
+                // Pass ownership of conn_ptr to a new RedisConnectionPtr,
+                // which is then passed to return_connection.
+                // The deleter for this new temporary RedisConnectionPtr is set to
+                // RedisConnectionDeleter(nullptr). This means if return_connection
+                // does not ultimately store this pointer (e.g., because the pool is full
+                // or the manager is shutting down), this temporary unique_ptr will
+                // simply delete conn_ptr when it goes out of scope at the end of the
+                // return_connection call. It prevents re-queuing or double-management.
+                manager_ptr_->return_connection(RedisConnectionPtr(conn_ptr, RedisConnectionDeleter(nullptr)));
             } else if (conn_ptr) {
+                // If there's no manager_ptr_, or if this is the deleter for the temporary
+                // RedisConnectionPtr created above and return_connection decided not to keep it,
+                // then the connection should be deleted.
                 delete conn_ptr;
             }
+            // The unique_ptr that this deleter instance belongs to has now completed its duty:
+            // conn_ptr has either been handed off to manager_ptr_->return_connection() or deleted.
         }
     };
 
