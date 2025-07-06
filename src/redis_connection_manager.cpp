@@ -296,34 +296,55 @@ RedisConnectionManager::RedisConnectionPtr RedisConnectionManager::get_connectio
                                    [&](const RedisConnectionManager::RedisConnectionPtr& p) { return p.get() == raw_conn; });
 
             if (it != pool_.end()) {
-                conn_to_return = std::move(*it);
-                pool_.erase(it);
+                conn_to_return = std::move(*it); // conn_to_return now owns the connection object
+                pool_.erase(it); // Remove the (now empty) unique_ptr from pool_
             } else {
-                stats_.idle_connections++;
-                continue;
+                // This case should ideally not happen if available_connections_ and pool_ are consistent.
+                // If it does, log an error or handle appropriately. For now, increment idle back and retry.
+                stats_.idle_connections++; // Rollback previous decrement
+                continue; // Retry the main loop
             }
 
             bool healthy = true;
-            if (conn_to_return && std::chrono::steady_clock::now() - conn_to_return->last_used_time > max_idle_time_before_ping_) {
-                lock.unlock();
-                healthy = conn_to_return->ping();
-                lock.lock();
+            if (conn_to_return && conn_to_return->is_connected()) { // Check if connected before pinging
+                if (std::chrono::steady_clock::now() - conn_to_return->last_used_time > max_idle_time_before_ping_) {
+                    lock.unlock();
+                    healthy = conn_to_return->ping();
+                    lock.lock();
 
-                if (shutting_down_) {
-                     if(conn_to_return) conn_to_return->disconnect();
-                     throw ConnectionException("Connection manager is shutting down during health check.");
+                    if (shutting_down_) {
+                        if (conn_to_return) { // conn_to_return still owns the connection
+                            conn_to_return->disconnect();
+                            // Let the unique_ptr's destruction (if it's not returned) handle calling return_connection
+                        }
+                        throw ConnectionException("Connection manager is shutting down during health check.");
+                    }
                 }
+            } else if (conn_to_return) { // Was in pool, but not connected
+                healthy = false;
+            } else { // conn_to_return is somehow null, should not happen if logic above is correct
+                healthy = false;
             }
 
-            if (!healthy || !conn_to_return || !conn_to_return->is_connected()) {
+
+            if (!healthy) {
                 stats_.connection_errors++;
-                stats_.total_connections--;
-                // conn_to_return (RedisConnectionPtr) will handle its own deletion via deleter
-                conn_to_return.reset(); 
-                continue;
+                if (conn_to_return) {
+                    // This connection was taken from pool_ and available_connections_
+                    // but was never made "active" in the stats by get_connection. It's just bad.
+                    // So, decrement total_connections as it's being removed from management.
+                    stats_.total_connections--; // Explicitly decrement the counter.
+
+                    RedisConnection* raw_to_delete = conn_to_return.release(); // Release from unique_ptr
+                    delete raw_to_delete; // Delete it directly
+                }
+                // conn_to_return is now effectively null or was already.
+                continue; // Retry loop in get_connection
             }
+
+            // If healthy and conn_to_return is valid:
             stats_.active_connections++;
-            return conn_to_return; // Already RedisConnectionPtr
+            return conn_to_return;
 
         } else if ((stats_.active_connections + pool_.size()) < static_cast<size_t>(config_.connection_pool_size)) {
             lock.unlock();
@@ -362,6 +383,7 @@ void RedisConnectionManager::return_connection(RedisConnectionManager::RedisConn
 
     RedisConnection* conn_raw = conn_param_owner.get();
     bool repool_this_connection = false;
+    bool needs_notification = false; // Track if notification is needed
 
     { // Mutex scope
         std::unique_lock<std::mutex> lock(pool_mutex_);
@@ -369,39 +391,34 @@ void RedisConnectionManager::return_connection(RedisConnectionManager::RedisConn
 
         if (shutting_down_) {
             conn_raw->disconnect();
-            // total_connections will be decremented when release_and_delete_manually is handled
+            // Not repooled. total_connections decremented below.
         } else if (conn_raw->is_connected() && pool_.size() < static_cast<size_t>(config_.connection_pool_size)) {
-            // Healthy and space in pool_ vector to store the unique_ptr
             repool_this_connection = true;
             available_connections_.push(conn_raw);
             pool_.push_back(std::move(conn_param_owner)); // conn_param_owner is now null
             stats_.idle_connections++;
-            condition_.notify_one();
-        } else { // Not repooling (shutting down, or not connected, or pool_ vector full)
-            if (!conn_raw->is_connected() && !shutting_down_) { // Don't double count if shutting down
+            needs_notification = true; // A connection became available
+        } else {
+            if (!conn_raw->is_connected() && !shutting_down_) {
                 stats_.connection_errors++;
             }
             conn_raw->disconnect();
+            // Not repooled. total_connections decremented below.
         }
 
-        // If not repooled, it needs to be deleted.
-        // This means stats_.total_connections needs to reflect that.
         if (!repool_this_connection) {
-            // Only decrement if it was a valid connection that's now being discarded
-            // and not due to shutdown (where total_connections is cleared later or handled differently).
-            // This logic ensures total_connections reflects actual managed connections.
-            if (conn_raw) { // Basic check
-                 bool was_in_pool_logically = true; // Assume it was, might need more complex tracking if created on-the-fly and never pooled
-                 if (was_in_pool_logically || stats_.total_connections > 0) { // ensure not decrementing below zero if logic is imperfect
-                    stats_.total_connections--;
-                 }
+            if (stats_.total_connections > 0) {
+                 stats_.total_connections--;
+                 needs_notification = true; // Pool capacity might have changed
             }
+        }
+
+        if (needs_notification) {
+            condition_.notify_one();
         }
     } // Mutex released
 
     if (!repool_this_connection) {
-        // conn_param_owner still owns the RedisConnection object if it wasn't moved.
-        // Release from unique_ptr and delete manually to prevent recursion.
         RedisConnection* to_delete = conn_param_owner.release();
         delete to_delete;
     }
