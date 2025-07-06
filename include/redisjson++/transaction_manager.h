@@ -93,7 +93,7 @@ public:
     private:
         friend class TransactionManager; // Allow TransactionManager to construct/return it.
 
-        std::unique_ptr<RedisConnection> connection_; // Single connection for this transaction
+        RedisConnectionManager::RedisConnectionPtr connection_; // Single connection for this transaction
         PathParser* path_parser_;     // Non-owning, for path validation/parsing if needed
         JSONModifier* json_modifier_; // Non-owning, for JSON ops if needed client-side
 
