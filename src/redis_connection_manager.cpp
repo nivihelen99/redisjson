@@ -53,51 +53,31 @@ bool RedisConnection::connect() {
     if (connected_) return true;
     last_error_message_.clear(); // Clear previous error
 
-    // Use blocking redisConnect instead of redisConnectWithTimeout
-    context_ = redisConnect(host_.c_str(), port_);
+    struct timeval tv_timeout;
+    tv_timeout.tv_sec = connect_timeout_ms_.count() / 1000;
+    tv_timeout.tv_usec = (connect_timeout_ms_.count() % 1000) * 1000;
+
+    context_ = redisConnectWithTimeout(host_.c_str(), port_, tv_timeout);
 
     if (context_ == nullptr || context_->err) {
         if (context_) {
-           last_error_message_ = "hiredis context error: " + std::string(context_->errstr ? context_->errstr : "Unknown error") + " (code: " + std::to_string(context_->err) + ")";
-            // The DEBUG logging for errstr content can be removed or kept as needed.
-            // For this change, I'll remove it to keep the diff focused on the blocking change.
-            // If issues persist, it can be re-added.
-            /*
-            std::string err_str_val = "Unknown error";
-            if (context_->errstr) {
-                err_str_val = std::string(context_->errstr);
-                std::cerr << "DEBUG: hiredis context->err: " << context_->err << std::endl;
-                std::cerr << "DEBUG: hiredis context->errstr: '" << err_str_val << "' (length: " << err_str_val.length() << ")" << std::endl;
-                std::cerr << "DEBUG: hiredis context->errstr (hex): ";
-                for (char c : err_str_val) {
-                    std::cerr << std::hex << static_cast<int>(static_cast<unsigned char>(c)) << " ";
-                }
-                std::cerr << std::dec << std::endl;
-            }
-            last_error_message_ = "hiredis context error: " + err_str_val + " (code: " + std::to_string(context_->err) + ")";
-            */
+            last_error_message_ = "hiredis context error (redisConnectWithTimeout): " + std::string(context_->errstr ? context_->errstr : "Unknown error") + " (code: " + std::to_string(context_->err) + ")";
             redisFree(context_);
             context_ = nullptr;
         } else {
-           last_error_message_ = "hiredis failed to allocate context";
+            last_error_message_ = "hiredis failed to allocate context (redisConnectWithTimeout)";
         }
         connected_ = false;
         return false;
     }
 
-    // For blocking connect, a socket timeout for commands is still important.
-    // Set socket timeout for read/write operations.
-    // We still need a timeout for commands, let's use the configured one.
-    struct timeval command_timeout_tv;
-    command_timeout_tv.tv_sec = connect_timeout_ms_.count() / 1000;
-    command_timeout_tv.tv_usec = (connect_timeout_ms_.count() % 1000) * 1000;
-
-    if (redisSetTimeout(context_, command_timeout_tv) != REDIS_OK) {
-        // Log the specific error for redisSetTimeout failure
+    // Set socket timeout for subsequent command read/write operations.
+    // This uses the same timeout value as the connection.
+    if (redisSetTimeout(context_, tv_timeout) != REDIS_OK) {
         if (context_->errstr) {
-           last_error_message_ = "redisSetTimeout failed: " + std::string(context_->errstr) + " (code: " + std::to_string(context_->err) + ")";
+            last_error_message_ = "redisSetTimeout failed: " + std::string(context_->errstr) + " (code: " + std::to_string(context_->err) + ")";
         } else {
-           last_error_message_ = "redisSetTimeout failed with no specific error string (code: " + std::to_string(context_->err) + ")";
+            last_error_message_ = "redisSetTimeout failed with no specific error string (code: " + std::to_string(context_->err) + ")";
         }
         redisFree(context_);
         context_ = nullptr;
