@@ -103,9 +103,6 @@ private:
     std::unique_ptr<JSONSchemaValidator> _schema_validator; // Added
     std::unique_ptr<JSONEventEmitter> _event_emitter;       // Added
 
-    // Internal helper to execute commands, potentially using Lua scripts
-    json _execute_lua_script(const std::string& script_name, const std::vector<std::string>& keys, const std::vector<std::string>& args) const;
-
     // Helper for operations that modify data and might need to invalidate cache / emit events
     void _perform_write_operation(const std::string& key, const std::optional<std::string>& path, std::function<void(RedisConnection&)> operation);
 
