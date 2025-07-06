@@ -243,110 +243,98 @@ void run_atomic_operations(redisjson::RedisJSONClient& client) {
 
 
 int main() {
-    // --- Non-SWSS Mode / Legacy Mode Example ---
-    std::cout << "--- Running in Non-SWSS (Legacy) Mode ---" << std::endl;
+    // --- SWSS Mode Example ---
+    std::cout << "--- Running in SWSS Mode ---" << std::endl;
+    redisjson::SwssClientConfig swss_config;
+    // Typically in SONiC, DBConnector connects to a specific DB, e.g., APPL_DB.
+    // The DB number for APPL_DB is often 0, but using names is safer if DBConnector supports it.
+    // For this example, let's assume we want to use a database name.
+    // If your DBConnector primarily uses integer IDs, you'd initialize it differently.
+    swss_config.db_name = "APPL_DB"; // Or "STATE_DB", "CONFIG_DB", etc.
+                                     // Or an integer if DBConnector uses int: swss_config.db_id = 0;
+    swss_config.unix_socket_path = "/var/run/redis/redis.sock"; // Standard SONiC path
+    swss_config.operation_timeout_ms = 5000;
+    swss_config.wait_for_db = false; // Set to true if the client should wait for DB availability
 
-    redisjson::LegacyClientConfig legacy_config;
-    const char* redis_host_env = std::getenv("REDIS_HOST");
-    if (redis_host_env) legacy_config.host = redis_host_env;
-    const char* redis_port_env = std::getenv("REDIS_PORT");
-    if (redis_port_env) try { legacy_config.port = std::stoi(redis_port_env); } catch (...) {}
-    const char* redis_password_env = std::getenv("REDIS_PASSWORD");
-    if (redis_password_env) legacy_config.password = redis_password_env;
+    std::cout << "Attempting to connect to SWSS DB: " << swss_config.db_name
+              << " via " << swss_config.unix_socket_path << std::endl;
 
-    // Default to localhost if not set by environment variables
-    if (legacy_config.host.empty()) {
-        legacy_config.host = "127.0.0.1";
-    }
-    // Default port if not set or invalid
-    if (legacy_config.port == 0) {
-         legacy_config.port = 6379;
-    }
-
-
-    std::cout << "Attempting to connect to Non-SWSS Redis at " << legacy_config.host << ":" << legacy_config.port << std::endl;
     try {
-        redisjson::RedisJSONClient legacy_client(legacy_config);
-        std::cout << "RedisJSONClient (Non-SWSS Mode) initialized successfully." << std::endl;
+        redisjson::RedisJSONClient swss_client(swss_config);
+        std::cout << "RedisJSONClient (SWSS Mode) initialized successfully for DB: " << swss_config.db_name << std::endl;
 
-        run_document_operations(legacy_client);
-        run_path_operations(legacy_client);
-        run_array_operations(legacy_client);
-        run_atomic_operations(legacy_client); // Original atomic operations using Lua
+        // Before running operations, it's good practice to flush the test DB if possible,
+        // or ensure keys are unique to avoid interference from previous runs.
+        // Note: DBConnector might not expose a flushdb() method directly.
+        // For a real SONiC app, you wouldn't typically flush APPL_DB.
+        // This is more for isolated testing.
+        // For this example, we'll rely on unique keys or manual cleanup.
 
-        print_header("Non-SWSS (Legacy) Mode Sample Program Finished");
+        run_document_operations(swss_client);
+        run_path_operations(swss_client); // Note: atomicity of path ops is lost in SWSS mode
+        run_array_operations(swss_client);  // Note: atomicity of array ops is lost in SWSS mode
+
+        // Rename atomic operations to reflect their non-atomic nature in SWSS mode.
+        // The functions in the client are already renamed to non_atomic_...
+        // The example function `run_atomic_operations` needs to call these.
+        // For clarity, we can rename the example function too or add comments.
+        print_header("Non-Atomic Operations (SWSS Mode - atomicity lost)");
+        // Create a temporary key for these non-atomic tests
+        std::string non_atomic_key = "sample:non_atomic:swss_counter";
+        swss_client.set_json(non_atomic_key, { {"value", 0}, {"version", 1} });
+        std::cout << "Setup: Initial non-atomic document set for key '" << non_atomic_key << "':\n"
+                  << swss_client.get_json(non_atomic_key).dump(2) << std::endl;
+        try {
+            json old_val = swss_client.non_atomic_get_set(non_atomic_key, "value", 100);
+            std::cout << "SUCCESS: NON_ATOMIC_GET_SET on 'value'. Old value: " << old_val.dump()
+                      << ", New value: " << swss_client.get_path(non_atomic_key, "value").dump() << std::endl;
+
+            bool cas_success = swss_client.non_atomic_compare_set(non_atomic_key, "version", 1, 20);
+             std::cout << "\nSUCCESS: NON_ATOMIC_COMPARE_SET on 'version' (expected 1, new 20). Success: "
+                      << (cas_success ? "true" : "false") << std::endl;
+            std::cout << "Current 'version': " << swss_client.get_path(non_atomic_key, "version").dump() << std::endl;
+
+        } catch (const redisjson::RedisJSONException& e) {
+            std::cerr << "ERROR: Non-atomic operation failed (SWSS): " << e.what() << std::endl;
+        }
+        swss_client.del_json(non_atomic_key);
+
+
+        print_header("SWSS Mode Sample Program Finished");
 
     } catch (const redisjson::ConnectionException& e) {
-        std::cerr << "CRITICAL (Non-SWSS): Could not connect to Redis. " << e.what() << std::endl;
-        std::cerr << "Ensure Redis is running at " << legacy_config.host << ":" << legacy_config.port
-                  << " or set REDIS_HOST/REDIS_PORT environment variables." << std::endl;
+        std::cerr << "CRITICAL (SWSS): Could not connect to Redis DB '" << swss_config.db_name << "'. " << e.what() << std::endl;
+        std::cerr << "Please ensure Redis is running and accessible via " << swss_config.unix_socket_path
+                  << " and the DB name/ID is correct." << std::endl;
         return 1;
     } catch (const redisjson::RedisJSONException& e) {
-        std::cerr << "CRITICAL (Non-SWSS): A RedisJSON++ error occurred: " << e.what() << std::endl;
+        std::cerr << "CRITICAL (SWSS): A RedisJSON++ error occurred: " << e.what() << std::endl;
         return 1;
     } catch (const std::exception& e) {
-        std::cerr << "CRITICAL (Non-SWSS): A standard C++ exception occurred: " << e.what() << std::endl;
+        std::cerr << "CRITICAL (SWSS): A standard C++ exception occurred: " << e.what() << std::endl;
         return 1;
     }
 
-    return 0;
+    // Removed Legacy Mode section for this SWSS-only sample
+    // std::cout << "\n\n--- Running in Legacy Mode (if configured) ---" << std::endl;
+    // ... (legacy mode code was here)
+
+    return 0; // Assuming success if we reached here without exiting due to an error.
 }
 
 /*
 To compile and run this sample (assuming RedisJSON++ is installed or built alongside):
 
-1. Save this file as `sample.cpp` (for Non-SWSS mode) in an `examples` directory.
+1. Save this file as `sample_swss.cpp` in an `examples` directory.
 2. Ensure RedisJSON++ library and its dependencies (hiredis, nlohmann/json) are findable by CMake.
 
-Example CMakeLists.txt for this sample (place in `examples/CMakeLists.txt`):
-
-```cmake
-cmake_minimum_required(VERSION 3.16)
-project(RedisJSONSample)
-
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED True)
-
-# This assumes the main library (RedisJSONPlusPlus) is in the parent directory.
-# If RedisJSONPlusPlus is installed, you might use find_package instead.
-# If it's fetched via FetchContent in a parent CMakeLists.txt, it should already be available.
-
-# If this CMakeLists.txt is processed by a parent CMakeLists.txt that already handles dependencies:
-# You might not need to find_package for hiredis and nlohmann_json again here.
-# However, if building this example standalone (e.g. for testing), you would.
-
-# For a standalone example build, you might need to find or fetch dependencies:
-# include(FetchContent)
-# FetchContent_Declare(hiredis GIT_REPOSITORY https://github.com/redis/hiredis.git GIT_TAG v1.2.0)
-# FetchContent_MakeAvailable(hiredis)
-# FetchContent_Declare(nlohmann_json GIT_REPOSITORY https://github.com/nlohmann/json.git GIT_TAG v3.11.3)
-# FetchContent_MakeAvailable(nlohmann_json)
-
-# Link to the main library target from the parent build.
-# The target RedisJSONPlusPlus::RedisJSONPlusPlus should be globally available
-# if the parent CMakeLists.txt used add_subdirectory or FetchContent_MakeAvailable.
-
-add_executable(sample_program sample.cpp)
-
-target_link_libraries(sample_program PRIVATE
-    RedisJSONPlusPlus::RedisJSONPlusPlus
-    # Dependencies like hiredis and nlohmann_json are often linked transitively
-    # by RedisJSONPlusPlus::RedisJSONPlusPlus if it's configured correctly.
-    # If not, you might need to add them explicitly:
-    # redisjson::hiredis # Or however hiredis target is named
-    # nlohmann_json::nlohmann_json # Or however nlohmann_json target is named
-)
-
-# To make this example buildable from the main CMakeLists.txt, add:
-# add_subdirectory(examples)
-# in the parent CMakeLists.txt after RedisJSONPlusPlus is available.
-```
+Example CMakeLists.txt for this sample (place in `examples/CMakeLists.txt` or modify root):
+(See root CMakeLists.txt for how this is compiled as `redisjson_sample_swss`)
 
 Build steps (from the root of the RedisJSON++ project):
 mkdir build
 cd build
 cmake ..
 cmake --build . # or make
-./examples/sample_program # Or path where your build system places it, e.g., ./bin/sample_program
-
+./examples/redisjson_sample_swss # Or path where your build system places it
 */
