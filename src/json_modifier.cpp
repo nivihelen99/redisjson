@@ -407,7 +407,7 @@ void JSONModifier::merge(json& document, const json& patch, MergeStrategy strate
 
 void JSONModifier::apply_patch(json& document, const json& patch_operations) {
     if (!patch_operations.is_array()) {
-        throw InvalidArgumentException("JSON Patch must be an array of operations.");
+        throw ArgumentInvalidException("JSON Patch must be an array of operations.");
     }
     try {
         document = document.patch(patch_operations);
