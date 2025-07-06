@@ -290,7 +290,7 @@ const std::string LuaScriptManager::JSON_ARRAY_APPEND_LUA = LUA_COMMON_HELPERS +
     end
 
     if target_array_ref == nil then return redis.error_reply('ERR_NOPATH Path not found') end
-    if type(target_array_ref) ~= 'table' then return "ERR_NOT_ARRAY" end 
+    if type(target_array_ref) ~= 'table' then return redis.error_reply('ERR_NOT_ARRAY Path points to a non-array type') end 
     table.insert(target_array_ref, value_to_append)
         
     local new_doc_json_str, err_enc = cjson.encode(doc)
@@ -318,7 +318,7 @@ const std::string LuaScriptManager::JSON_ARRAY_PREPEND_LUA = LUA_COMMON_HELPERS 
     end
 
     if target_array_ref == nil then return redis.error_reply('ERR_NOPATH Path not found') end
-    if type(target_array_ref) ~= 'table' then return "ERR_NOT_ARRAY" end
+    if type(target_array_ref) ~= 'table' then return redis.error_reply('ERR_NOT_ARRAY Path points to a non-array type') end
     table.insert(target_array_ref, 1, value_to_prepend)
     
     local new_doc_json_str, err_enc = cjson.encode(doc)
