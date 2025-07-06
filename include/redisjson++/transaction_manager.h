@@ -27,7 +27,7 @@ public:
         // Constructor takes a connection (leased from manager) and potentially PathParser/JSONModifier
         // if paths/values need pre-processing before being added as Redis commands.
         // The Transaction object will use this single connection for MULTI/EXEC.
-        explicit Transaction(std::unique_ptr<RedisConnection> conn,
+        explicit Transaction(RedisConnectionManager::RedisConnectionPtr conn,
                              PathParser* path_parser,
                              JSONModifier* json_modifier);
         ~Transaction();
