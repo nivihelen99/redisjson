@@ -54,7 +54,7 @@ RedisConnectionManager::RedisConnectionPtr RedisJSONClient::get_redis_connection
 // --- Document Operations ---
 
 void RedisJSONClient::set_json(const std::string& key, const json& document, const SetOptions& opts) {
-    std::unique_ptr<RedisConnection> conn = get_redis_connection();
+    RedisConnectionManager::RedisConnectionPtr conn = get_redis_connection();
     std::string doc_str = document.dump(); // Serialize JSON to string
 
     RedisReplyPtr reply;
@@ -83,7 +83,7 @@ void RedisJSONClient::set_json(const std::string& key, const json& document, con
 }
 
 json RedisJSONClient::get_json(const std::string& key) const {
-    std::unique_ptr<RedisConnection> conn = get_redis_connection();
+    RedisConnectionManager::RedisConnectionPtr conn = get_redis_connection();
 
     RedisReplyPtr reply(static_cast<redisReply*>(
         conn->command("GET %s", key.c_str())
@@ -125,7 +125,7 @@ json RedisJSONClient::get_json(const std::string& key) const {
 }
 
 bool RedisJSONClient::exists_json(const std::string& key) const {
-    std::unique_ptr<RedisConnection> conn = get_redis_connection();
+    RedisConnectionManager::RedisConnectionPtr conn = get_redis_connection();
 
     RedisReplyPtr reply(static_cast<redisReply*>(
         conn->command("EXISTS %s", key.c_str())
@@ -141,7 +141,7 @@ bool RedisJSONClient::exists_json(const std::string& key) const {
 }
 
 void RedisJSONClient::del_json(const std::string& key) {
-    std::unique_ptr<RedisConnection> conn = get_redis_connection();
+    RedisConnectionManager::RedisConnectionPtr conn = get_redis_connection();
 
     RedisReplyPtr reply(static_cast<redisReply*>(
         conn->command("DEL %s", key.c_str())
@@ -430,7 +430,7 @@ void RedisJSONClient::merge_json(const std::string& key, const json& patch,
         // Depending on strictness, one might even throw an std::invalid_argument if only DEEP is supported.
     }
 
-    std::unique_ptr<RedisConnection> conn = get_redis_connection();
+    RedisConnectionManager::RedisConnectionPtr conn = get_redis_connection();
     std::string patch_str = patch.dump();
     
     // JSON.MERGE <key> <path> <value>
@@ -612,7 +612,7 @@ bool RedisJSONClient::atomic_compare_set(const std::string& key, const std::stri
 std::vector<std::string> RedisJSONClient::keys_by_pattern(const std::string& pattern) const {
     std::vector<std::string> found_keys;
     std::string cursor = "0";
-    std::unique_ptr<RedisConnection> conn; // Declare here for potential reuse across SCAN loops
+    RedisConnectionManager::RedisConnectionPtr conn; // Declare here for potential reuse across SCAN loops
 
     do {
         conn = get_redis_connection(); // Get a fresh connection for each SCAN command or reuse carefully.
@@ -826,7 +826,7 @@ void RedisJSONClient::_perform_write_operation(const std::string& key, const std
     // Internal helper. If called by stubbed methods, it might not be fully exercised.
     // Actual implementation would involve getting a connection, running operation,
     // then cache invalidation and event emission logic.
-    std::unique_ptr<RedisConnection> conn = get_redis_connection();
+    RedisConnectionManager::RedisConnectionPtr conn = get_redis_connection();
     try {
         operation(*conn);
         // if (_json_cache) _json_cache->invalidate(key, path);
