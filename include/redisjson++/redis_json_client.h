@@ -6,35 +6,77 @@
 #include <vector>
 #include <string>
 #include <nlohmann/json.hpp>
+#include <optional> // For std::optional
 
 #include "common_types.h"
 #include "exceptions.h"
-#include "redis_connection_manager.h"
+// #include "redis_connection_manager.h" // To be replaced
 #include "path_parser.h"
 #include "json_modifier.h"
-#include "lua_script_manager.h"
-#include "transaction_manager.h" // Added
-#include "json_query_engine.h"   // Added
-#include "json_cache.h"          // Added
-#include "json_schema_validator.h" // Added
-#include "json_event_emitter.h"  // Added
+// #include "lua_script_manager.h" // To be removed or heavily adapted
+// #include "transaction_manager.h" // May be removed if SWSS doesn't support easily
+#include "json_query_engine.h"   // May be adapted or removed
+#include "json_cache.h"          // May be adapted or removed
+#include "json_schema_validator.h" // May be adapted or removed
+#include "json_event_emitter.h"  // May be adapted or removed
+
+// Placeholder for actual SWSS headers
+// Actual path might be different, e.g. <swss/dbconnector.h>
+// For now, use a path that might work in a typical SONiC build environment.
+#if __has_include(<swss/dbconnector.h>)
+#include <swss/dbconnector.h>
+#elif __has_include("dbconnector.h") // Local build / test
+#include "dbconnector.h"
+#else
+// Minimal fake DBConnector for compilation if header not found
+namespace swss {
+class DBConnector {
+public:
+    DBConnector(const std::string& dbName, unsigned int timeout, bool waitForDb = false, const std::string& unixPath = "") {}
+    DBConnector(int dbId, unsigned int timeout, bool waitForDb = false, const std::string& unixPath = "") {}
+    DBConnector(const std::string& dbName, const std::string& unixPath, unsigned int timeout) {}
+
+    void set(const std::string& key, const std::string& value, const std::string& op = "SET", const std::string& prefix = "") { (void)key; (void)value; (void)op; (void)prefix; }
+    std::string get(const std::string& key, const std::string& prefix = "") { (void)key; (void)prefix; return ""; }
+    bool exists(const std::string& key, const std::string& prefix = "") { (void)key; (void)prefix; return false; }
+    long long del(const std::string& key, const std::string& prefix = "") { (void)key; (void)prefix; return 0; }
+    std::vector<std::string> keys(const std::string& pattern, const std::string& prefix = "") { (void)pattern; (void)prefix; return {}; }
+    void flushdb() {} // For testing primarily
+
+    // Mock transaction methods - actual DBConnector might not have these or have different ones
+    void multi() {}
+    redisReply* exec() { return nullptr; } // Hiredis type, may not be available or used
+    void discard() {}
+    // Raw command execution - highly dependent on actual DBConnector providing this
+    redisReply* command(const char* format, ...) { (void)format; return nullptr; }
+    redisReply* commandArgv(int argc, const char** argv, const size_t* argvlen) { (void)argc; (void)argv; (void)argvlen; return nullptr; }
+
+    // If DBConnector wraps hiredis context directly (less likely for typical SWSS usage)
+    redisContext* getContext() { return nullptr; }
+};
+} // namespace swss
+#endif
+
 
 namespace redisjson {
 
 using json = nlohmann::json;
 
-// Forward declarations
-class RedisConnection;
-class TransactionManager;
-class JSONQueryEngine;
-class JSONCache;
-class JSONSchemaValidator;
-class JSONEventEmitter;
+// Forward declarations for components that might be kept/adapted
+// class TransactionManager; // Likely removed or re-thought
+class JSONQueryEngine;    // May change significantly
+class JSONCache;          // May change
+class JSONSchemaValidator;// May change
+class JSONEventEmitter;   // May change
 
 class RedisJSONClient {
 public:
-    explicit RedisJSONClient(const ClientConfig& client_config);
-    ~RedisJSONClient(); // Ensure proper cleanup of unique_ptrs
+    // Constructor for legacy direct Redis connections (existing config)
+    explicit RedisJSONClient(const LegacyClientConfig& client_config);
+    // Constructor for SONiC SWSS environment
+    explicit RedisJSONClient(const SwssClientConfig& swss_config);
+
+    ~RedisJSONClient();
 
     // Document Operations
     void set_json(const std::string& key, const json& document,
@@ -43,74 +85,86 @@ public:
     bool exists_json(const std::string& key) const;
     void del_json(const std::string& key);
 
-    // Path Operations
+    // Path Operations (will be client-side get-modify-set, atomicity lost)
     json get_path(const std::string& key, const std::string& path) const;
     void set_path(const std::string& key, const std::string& path,
-                  const json& value, const SetOptions& opts = {});
+                  const json& value, const SetOptions& opts = {}); // create_path in SetOptions might be used client-side
     void del_path(const std::string& key, const std::string& path);
     bool exists_path(const std::string& key, const std::string& path) const;
 
-    // Array Operations
+    // Array Operations (will be client-side get-modify-set, atomicity lost)
     void append_path(const std::string& key, const std::string& path,
-                     const json& value); // Appends value to array at path
+                     const json& value);
     void prepend_path(const std::string& key, const std::string& path,
-                      const json& value); // Prepends value to array at path
+                      const json& value);
     json pop_path(const std::string& key, const std::string& path,
-                  int index = -1); // Removes and returns element from array at path
+                  int index = -1);
     size_t array_length(const std::string& key, const std::string& path) const;
 
-    // Merge Operations
-    void merge_json(const std::string& key, const json& patch,
-                    const MergeStrategy& strategy = MergeStrategy::DEEP);
-    void patch_json(const std::string& key, const json& patch); // RFC 6902 JSON Patch
+    // Merge Operations (JSON.MERGE not standard in Redis, client-side or specific command needed)
+    // For SWSS, this will likely be client-side get-merge-set.
+    // MergeStrategy might be hard to implement fully client-side without deep knowledge of ReJSON behavior.
+    // Let's simplify to a basic client-side merge or require a specific RedisJSON command if available via DBConnector.
+    void merge_json(const std::string& key, const json& patch); // Simplified: deep merge by default client-side
+    void patch_json(const std::string& key, const json& patch_operations); // RFC 6902 JSON Patch, client-side
 
-    // Batch Operations (Conceptual - requires Operation struct and BatchResult)
-    // struct Operation { /* ... */ };
-    // struct BatchResult { /* ... */ };
-    // BatchResult batch_operations(const std::vector<Operation>& ops);
-
-    // Atomic Operations (using Lua)
-    json atomic_get_set(const std::string& key, const std::string& path,
-                        const json& new_value);
-    bool atomic_compare_set(const std::string& key, const std::string& path,
-                           const json& expected, const json& new_value);
+    // Atomic Operations (atomicity will be lost with client-side logic)
+    // These will become get-then-set or get-compare-then-set
+    json non_atomic_get_set(const std::string& key, const std::string& path,
+                            const json& new_value);
+    bool non_atomic_compare_set(const std::string& key, const std::string& path,
+                                const json& expected, const json& new_value);
 
     // Utility Operations
     std::vector<std::string> keys_by_pattern(const std::string& pattern) const;
-    json search_by_value(const std::string& key, const json& search_value) const; // May use Lua or client-side logic
-    std::vector<std::string> get_all_paths(const std::string& key) const; // Get all paths in a document
+    json search_by_value(const std::string& key, const json& search_value) const; // Stays client-side
+    std::vector<std::string> get_all_paths(const std::string& key) const; // Stays client-side
 
-    // Access to sub-components (optional, depending on design preference)
-    // Consider if these should be public or if client should mediate all interactions
-    JSONQueryEngine& query_engine();
-    JSONCache& cache();
-    JSONSchemaValidator& schema_validator();
-    JSONEventEmitter& event_emitter();
-    TransactionManager& transaction_manager(); // Added for transaction access
-
-    // Helper to get a connection (can be private or protected if only used internally)
-    RedisConnectionManager::RedisConnectionPtr get_redis_connection() const;
+    // Access to sub-components (review if these are still relevant/how they adapt)
+    // JSONQueryEngine& query_engine();
+    // JSONCache& cache();
+    // JSONSchemaValidator& schema_validator();
+    // JSONEventEmitter& event_emitter();
+    // TransactionManager& transaction_manager(); // Likely removed
 
 private:
-    ClientConfig _config;
-    std::unique_ptr<RedisConnectionManager> _connection_manager;
+    // Determine which config is active, or use a variant/union if both modes needed simultaneously (unlikely)
+    bool _is_swss_mode = false;
+    LegacyClientConfig _legacy_config;
+    SwssClientConfig _swss_config;
+
+    std::unique_ptr<swss::DBConnector> _db_connector; // For SWSS mode
+
+    // Keep direct Redis connection management for legacy mode
+    std::unique_ptr<RedisConnectionManager> _connection_manager; // For legacy mode
+    std::unique_ptr<LuaScriptManager> _lua_script_manager; // For legacy mode, might be conditionally compiled/used
+
+    // Common components (may need adaptation based on mode)
     std::unique_ptr<PathParser> _path_parser;
-    std::unique_ptr<JSONModifier> _json_modifier;
-    std::unique_ptr<LuaScriptManager> _lua_script_manager;
-    std::unique_ptr<TransactionManager> _transaction_manager; // Added
-    std::unique_ptr<JSONQueryEngine> _query_engine;         // Added
-    std::unique_ptr<JSONCache> _json_cache;                 // Added
-    std::unique_ptr<JSONSchemaValidator> _schema_validator; // Added
-    std::unique_ptr<JSONEventEmitter> _event_emitter;       // Added
+    std::unique_ptr<JSONModifier> _json_modifier; // Used for client-side modifications
 
-    // Helper for operations that modify data and might need to invalidate cache / emit events
-    void _perform_write_operation(const std::string& key, const std::optional<std::string>& path, std::function<void(RedisConnection&)> operation);
+    // Sub-components that might be removed or heavily adapted for SWSS mode
+    // std::unique_ptr<TransactionManager> _transaction_manager;
+    // std::unique_ptr<JSONQueryEngine> _query_engine;
+    // std::unique_ptr<JSONCache> _json_cache;
+    // std::unique_ptr<JSONSchemaValidator> _schema_validator;
+    // std::unique_ptr<JSONEventEmitter> _event_emitter;
 
-    // Helper to fetch a document, potentially using cache
-    json _get_document_with_caching(const std::string& key) const;
+    // Helper to get a connection for legacy mode
+    RedisConnectionManager::RedisConnectionPtr get_legacy_redis_connection() const;
 
     // Helper to parse json from string reply, throws on error
     json _parse_json_reply(const std::string& reply_str, const std::string& context_msg) const;
+
+    // Client-side implementation for path-based modifications
+    json _get_document_for_modification(const std::string& key) const;
+    void _set_document_after_modification(const std::string& key, const json& document, const SetOptions& opts);
+
+    // Placeholder for direct Redis command execution if DBConnector supports it (for legacy Lua scripts if adapted)
+    // RedisReplyPtr _execute_redis_command(const char* format, ...);
+    // RedisReplyPtr _execute_redis_command_argv(int argc, const char **argv, const size_t *argvlen);
 };
+
+} // namespace redisjson
 
 } // namespace redisjson

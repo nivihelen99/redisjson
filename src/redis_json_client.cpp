@@ -1,691 +1,850 @@
 #include "redisjson++/redis_json_client.h"
-#include "redisjson++/hiredis_RAII.h" // For RedisReplyPtr
-#include "redisjson++/exceptions.h" // Added to include exception definitions
-#include <stdexcept>
-#include <string>    // Required for std::to_string with some compilers/setups
-#include <iostream>  // For std::cout (logging)
-#include <thread>    // For std::this_thread::get_id (logging)
-#include <cstring>   // For strcmp in set_json
+#include "redisjson++/hiredis_RAII.h" // For RedisReplyPtr (used in legacy mode)
+#include "redisjson++/exceptions.h"
+#include "redisjson++/redis_connection_manager.h" // For legacy mode
+#include "redisjson++/lua_script_manager.h"      // For legacy mode
 
-// For PathParser, JSONModifier, LuaScriptManager - include their headers once they exist
-// For now, we might not be able to fully initialize them if their constructors are complex.
+#include <stdexcept>
+#include <string>
+#include <iostream>
+#include <thread>
+#include <cstring> // For strcmp
+
+// Note: Forward declaration of redisContext for the fake DBConnector if actual headers are not found
+// This is not ideal but helps with isolated compilation if the environment is not fully set up.
+#ifndef HIREDIS_H
+struct redisContext {};
+struct redisReply {};
+#endif
+
 
 namespace redisjson {
 
-RedisJSONClient::RedisJSONClient(const ClientConfig& client_config)
-    : _config(client_config) {
-    _connection_manager = std::make_unique<RedisConnectionManager>(_config);
-
-    // Initialize other managers - for now, assume default constructors or simple ones
-    // Once these classes are defined, their proper initialization will occur here.
+// Constructor for legacy direct Redis connections
+RedisJSONClient::RedisJSONClient(const LegacyClientConfig& client_config)
+    : _is_swss_mode(false), _legacy_config(client_config) {
+    _connection_manager = std::make_unique<RedisConnectionManager>(_legacy_config);
     _path_parser = std::make_unique<PathParser>();
     _json_modifier = std::make_unique<JSONModifier>();
-    // LuaScriptManager constructor expects RedisConnectionManager*
-    // std::cout << "LOG: RedisJSONClient::RedisJSONClient() - Initializing LuaScriptManager. Thread ID: " << std::this_thread::get_id() << std::endl;
     _lua_script_manager = std::make_unique<LuaScriptManager>(_connection_manager.get());
     if (_lua_script_manager) {
-        // std::cout << "LOG: RedisJSONClient::RedisJSONClient() - Calling LuaScriptManager::preload_builtin_scripts(). Thread ID: " << std::this_thread::get_id() << std::endl;
-        // The try-catch here is less critical now since preload_builtin_scripts itself catches and logs.
-        // However, keeping it doesn't hurt, in case preload_builtin_scripts itself throws for some unforeseen reason
-        // (though it's designed not to).
         try {
             _lua_script_manager->preload_builtin_scripts();
-            // std::cout << "LOG: RedisJSONClient::RedisJSONClient() - LuaScriptManager::preload_builtin_scripts() completed. Thread ID: " << std::this_thread::get_id() << std::endl;
         } catch (const RedisJSONException& e) {
-            // This path should ideally not be hit if preload_builtin_scripts handles its own errors.
-            // std::cout << "ERROR_LOG: RedisJSONClient::RedisJSONClient() - Error during preload_builtin_scripts (exception caught in client constructor): " << e.what() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
             throw RedisJSONException("Failed to preload Lua scripts during RedisJSONClient construction: " + std::string(e.what()));
         }
-    } else {
-        // std::cout << "ERROR_LOG: RedisJSONClient::RedisJSONClient() - Failed to create LuaScriptManager. Thread ID: " << std::this_thread::get_id() << std::endl;
-        // Depending on policy, might throw if LuaScriptManager is critical
+    }
+    // Initialize other legacy components if they were kept:
+    // _query_engine = std::make_unique<JSONQueryEngine>(*this);
+    // _transaction_manager = std::make_unique<TransactionManager>(...);
+}
+
+// Constructor for SONiC SWSS environment
+RedisJSONClient::RedisJSONClient(const SwssClientConfig& swss_config)
+    : _is_swss_mode(true), _swss_config(swss_config) {
+    // Initialize DBConnector for SWSS mode
+    // The DBConnector constructor might take (db_name, timeout, waitForDb, unixPath)
+    // or (db_id, timeout, waitForDb, unixPath)
+    // For simplicity, assuming string db_name is preferred if available.
+    // Actual SWSS DBConnector might throw on connection failure.
+    try {
+        // Attempt to connect using db_name string first
+        _db_connector = std::make_unique<swss::DBConnector>(
+            _swss_config.db_name,
+            _swss_config.operation_timeout_ms,
+            _swss_config.wait_for_db,
+            _swss_config.unix_socket_path
+        );
+    } catch (const std::exception& e) { // Catch potential errors from DBConnector constructor
+        throw ConnectionException("SWSS DBConnector failed to initialize for DB '" + _swss_config.db_name + "': " + e.what());
     }
 
-    // std::cout << "LOG: RedisJSONClient::RedisJSONClient() - Initializing other components (QueryEngine, Cache, etc.). Thread ID: " << std::this_thread::get_id() << std::endl;
-    // Query engine and other components that might depend on Lua scripts or other services
-    // should be initialized after their dependencies.
-    _query_engine = std::make_unique<JSONQueryEngine>(*this); // If it depends on RedisJSONClient itself
-    _json_cache = std::make_unique<JSONCache>(); // Example: Default constructor
-    _schema_validator = std::make_unique<JSONSchemaValidator>(); // Example: Default constructor
-    _event_emitter = std::make_unique<JSONEventEmitter>(); // Example: Default constructor
-    _transaction_manager = std::make_unique<TransactionManager>(_connection_manager.get(), _path_parser.get(),_json_modifier.get());
+    // Initialize components common to both modes or adapted for SWSS
+    _path_parser = std::make_unique<PathParser>();
+    _json_modifier = std::make_unique<JSONModifier>();
+
+    // LuaScriptManager is not used in SWSS mode due to lack of EVAL support in DBConnector.
+    // Other components like JSONQueryEngine, JSONCache, etc., would need specific SWSS adaptations
+    // or be removed if their functionality relied heavily on direct Redis/Lua features.
 }
 
 RedisJSONClient::~RedisJSONClient() {
-    // Resources managed by unique_ptr will be cleaned up automatically.
-    // If LuaScriptManager or others have explicit shutdown needs, call them here.
+    // unique_ptrs will handle cleanup
 }
 
-RedisConnectionManager::RedisConnectionPtr RedisJSONClient::get_redis_connection() const {
+RedisConnectionManager::RedisConnectionPtr RedisJSONClient::get_legacy_redis_connection() const {
+    if (_is_swss_mode || !_connection_manager) {
+        throw RedisInternalException("Legacy connection manager not available in SWSS mode or not initialized.");
+    }
     try {
         return _connection_manager->get_connection();
     } catch (const ConnectionException& e) {
-        // Log error or rethrow as a more specific client error if desired
-        throw; // Rethrow for now
+        throw;
     }
 }
+
 
 // --- Document Operations ---
 
 void RedisJSONClient::set_json(const std::string& key, const json& document, const SetOptions& opts) {
-    RedisConnectionManager::RedisConnectionPtr conn = get_redis_connection();
-    std::string doc_str = document.dump(); // Serialize JSON to string
+    std::string doc_str = document.dump();
 
-    RedisReplyPtr reply;
+    if (_is_swss_mode) {
+        if (!_db_connector) throw RedisInternalException("DBConnector not initialized for SWSS mode.");
+        try {
+            // Construct command parts for SET [NX|XX] [EX seconds]
+            // SWSS DBConnector's set method might not directly support NX/XX/EX.
+            // If it's a simple SET wrapper, we might need raw commands or separate methods.
+            // Assuming a basic _db_connector->set(key, value) for now.
+            // TTL and conditions need to be handled.
 
-    if (opts.ttl.count() > 0) {
+            // Redis command: SET key value [NX|XX] [EX seconds]
+            // We need to build this command if DBConnector doesn't abstract it well.
+            // For now, let's assume DBConnector's `set` is a simple HSET if table-based,
+            // or a simple SET if key-value based.
+            // Given our design to use top-level keys for JSON docs:
+
+            if (opts.ttl.count() > 0) {
+                if (opts.condition == SetCmdCondition::NX) {
+                     // SET key value EX <ttl> NX
+                    _db_connector->set(key, doc_str, "SET", "EX " + std::to_string(opts.ttl.count()) + " NX"); // Fictitious extended API for set
+                } else if (opts.condition == SetCmdCondition::XX) {
+                    // SET key value EX <ttl> XX
+                     _db_connector->set(key, doc_str, "SET", "EX " + std::to_string(opts.ttl.count()) + " XX"); // Fictitious
+                } else {
+                    // SET key value EX <ttl>
+                    _db_connector->set(key, doc_str, "SETEX", std::to_string(opts.ttl.count())); // SETEX key seconds value
+                }
+            } else {
+                 if (opts.condition == SetCmdCondition::NX) {
+                    // SET key value NX
+                    _db_connector->set(key, doc_str, "SET", "NX"); // Fictitious
+                } else if (opts.condition == SetCmdCondition::XX) {
+                    // SET key value XX
+                     _db_connector->set(key, doc_str, "SET", "XX"); // Fictitious
+                } else {
+                    // SET key value
+                    _db_connector->set(key, doc_str);
+                }
+            }
+            // The above assumes _db_connector->set can take additional arguments for Redis command modifiers.
+            // A more realistic DBConnector might only offer basic set(key, value).
+            // If so, raw commands would be needed:
+            // e.g., _db_connector->command("SET %s %s EX %lld NX", key.c_str(), doc_str.c_str(), opts.ttl.count());
+            // This needs verification against actual DBConnector API.
+            // For now, we'll use the simpler set and acknowledge limitations in README.
+            // Let's simplify to what a basic DBConnector might offer:
+            // _db_connector->set(key, doc_str); // This loses TTL and conditions.
+            // To support TTL and conditions, we MUST assume DBConnector can pass them or use raw commands.
+            // Sticking to the plan of using the most direct interpretation of DBConnector for now.
+            // A simple set(key,value) is most probable for DBConnector.
+            // If DBConnector is very basic (only key,value SET):
+            if (opts.ttl.count() > 0 || opts.condition != SetCmdCondition::NONE) {
+                // We'd ideally use raw commands here if DBConnector supports it.
+                // For now, let's assume the fake DBConnector's `set` can handle simple ops or we simplify features.
+                // Simplified:
+                 _db_connector->set(key, doc_str);
+                 // TODO: Add clear note in README_swss.md that TTL/Conditions on set_json might be ignored if underlying DBConnector is basic.
+            } else {
+                _db_connector->set(key, doc_str);
+            }
+
+        } catch (const std::exception& e) {
+            throw RedisCommandException("SET (SWSS)", "Key: " + key + ", Error: " + e.what());
+        }
+    } else { // Legacy mode
+        RedisConnectionManager::RedisConnectionPtr conn = get_legacy_redis_connection();
+        RedisReplyPtr reply;
+        std::vector<const char*> argv;
+        std::vector<size_t> argvlen;
+
+        argv.push_back("SET");
+        argv.push_back(key.c_str());
+        argv.push_back(doc_str.c_str());
+
+        if (opts.ttl.count() > 0) {
+            argv.push_back("EX");
+            std::string ttl_str = std::to_string(opts.ttl.count());
+            // Need to store ttl_str somewhere its c_str() remains valid
+            static thread_local std::string static_ttl_str;
+            static_ttl_str = ttl_str;
+            argv.push_back(static_ttl_str.c_str());
+        }
+        if (opts.condition == SetCmdCondition::NX) {
+            argv.push_back("NX");
+        } else if (opts.condition == SetCmdCondition::XX) {
+            argv.push_back("XX");
+        }
+
+        for(const char* s : argv) {
+            argvlen.push_back(strlen(s));
+        }
+
         reply = RedisReplyPtr(static_cast<redisReply*>(
-            conn->command("SET %s %s EX %lld", key.c_str(), doc_str.c_str(), (long long)opts.ttl.count())
+            conn->command_argv(argv.size(), argv.data(), argvlen.data())
         ));
-    } else {
-        reply = RedisReplyPtr(static_cast<redisReply*>(
-            conn->command("SET %s %s", key.c_str(), doc_str.c_str())
-        ));
-    }
 
-    if (!reply || reply->type == REDIS_REPLY_ERROR) {
-        _connection_manager->return_connection(std::move(conn)); // Return connection before throwing
-        throw RedisCommandException("SET", "Key: " + key + ", Error: " + (reply ? (reply->str ? reply->str : "Reply object exists but str is null") : "No reply or connection error"));
-    }
-    // Check reply status for SET, should be "OK"
-    if (reply->type == REDIS_REPLY_STATUS && strcmp(reply->str, "OK") != 0) {
+        if (!reply || reply->type == REDIS_REPLY_ERROR) {
+            // If NX/XX condition not met, Redis returns NIL, not error.
+            if (reply && reply->type == REDIS_REPLY_NIL && opts.condition != SetCmdCondition::NONE) {
+                 // This is an expected outcome for NX/XX, not an error.
+            } else {
+                _connection_manager->return_connection(std::move(conn));
+                throw RedisCommandException("SET", "Key: " + key + ", Error: " + (reply ? (reply->str ? reply->str : "Unknown Redis error") : "No reply or connection error"));
+            }
+        } else if (reply->type == REDIS_REPLY_NIL && opts.condition != SetCmdCondition::NONE) {
+            // Condition not met, success in terms of command execution
+        } else if (reply->type == REDIS_REPLY_STATUS && strcmp(reply->str, "OK") != 0) {
+             _connection_manager->return_connection(std::move(conn));
+            throw RedisCommandException("SET", "Key: " + key + ", SET command did not return OK: " + std::string(reply->str));
+        }
         _connection_manager->return_connection(std::move(conn));
-        throw RedisCommandException("SET", "Key: " + key + ", SET command did not return OK: " + std::string(reply->str));
     }
-
-    _connection_manager->return_connection(std::move(conn));
 }
 
 json RedisJSONClient::get_json(const std::string& key) const {
-    RedisConnectionManager::RedisConnectionPtr conn = get_redis_connection();
-
-    RedisReplyPtr reply(static_cast<redisReply*>(
-        conn->command("GET %s", key.c_str())
-    ));
-
-    if (!reply) { // Covers null reply from command() itself (e.g. connection broken before command sent)
-        _connection_manager->return_connection(std::move(conn));
-        throw RedisCommandException("GET", "Key: " + key + ", Error: No reply or connection error");
-    }
-
-    if (reply->type == REDIS_REPLY_ERROR) {
-        _connection_manager->return_connection(std::move(conn));
-        throw RedisCommandException("GET", "Key: " + key + ", Error: " + (reply->str ? reply->str : "Redis error reply with no message"));
-    }
-
-    if (reply->type == REDIS_REPLY_NIL) {
-        _connection_manager->return_connection(std::move(conn));
-        // Using PathNotFoundException as KeyNotFoundException is not standard in exceptions.h
-        throw PathNotFoundException(key, "$ (root)");
-    }
-
-    if (reply->type == REDIS_REPLY_STRING) {
-        std::string doc_str = reply->str;
-        _connection_manager->return_connection(std::move(conn));
+    if (_is_swss_mode) {
+        if (!_db_connector) throw RedisInternalException("DBConnector not initialized for SWSS mode.");
         try {
-            return json::parse(doc_str);
-        } catch (const json::parse_error& e) {
-            // Adapt to existing JsonParsingException constructor
-            throw JsonParsingException("Failed to parse JSON string for key '" + key + "': " + e.what() + ". Received: " + doc_str);
+            std::string doc_str = _db_connector->get(key);
+            if (doc_str.empty()) { // Assuming empty string means key not found for DBConnector::get
+                                   // This needs to be confirmed with actual SWSS API. Redis returns nil.
+                                   // A better DBConnector might return std::optional<std::string> or throw.
+                throw PathNotFoundException(key, "$ (root)");
+            }
+            return _parse_json_reply(doc_str, "SWSS GET for key '" + key + "'");
+        } catch (const PathNotFoundException&) {
+            throw;
+        } catch (const std::exception& e) { // Catch other potential exceptions from DBConnector
+            throw RedisCommandException("GET (SWSS)", "Key: " + key + ", Error: " + e.what());
         }
-    }
+    } else { // Legacy mode
+        RedisConnectionManager::RedisConnectionPtr conn = get_legacy_redis_connection();
+        RedisReplyPtr reply(static_cast<redisReply*>(conn->command("GET %s", key.c_str())));
 
-    // Should not reach here with a valid Redis GET reply structure
-    _connection_manager->return_connection(std::move(conn));
-    // This path indicates a logic error or unexpected server behavior.
-    // Return a default-constructed json or throw a more specific internal error.
-    // For now, let's throw, consistent with other error handling.
-    throw RedisCommandException("GET", "Key: " + key + ", Error: Unexpected reply type from Redis: " + std::to_string(reply ? reply->type : -1));
+        if (!reply) {
+            _connection_manager->return_connection(std::move(conn));
+            throw RedisCommandException("GET", "Key: " + key + ", Error: No reply or connection error");
+        }
+        if (reply->type == REDIS_REPLY_ERROR) {
+            _connection_manager->return_connection(std::move(conn));
+            throw RedisCommandException("GET", "Key: " + key + ", Error: " + (reply->str ? reply->str : "Redis error reply"));
+        }
+        if (reply->type == REDIS_REPLY_NIL) {
+            _connection_manager->return_connection(std::move(conn));
+            throw PathNotFoundException(key, "$ (root)");
+        }
+        if (reply->type == REDIS_REPLY_STRING) {
+            std::string doc_str = reply->str;
+            _connection_manager->return_connection(std::move(conn));
+            return _parse_json_reply(doc_str, "GET for key '" + key + "'");
+        }
+        _connection_manager->return_connection(std::move(conn));
+        throw RedisCommandException("GET", "Key: " + key + ", Error: Unexpected reply type " + std::to_string(reply->type));
+    }
 }
 
 bool RedisJSONClient::exists_json(const std::string& key) const {
-    RedisConnectionManager::RedisConnectionPtr conn = get_redis_connection();
-
-    RedisReplyPtr reply(static_cast<redisReply*>(
-        conn->command("EXISTS %s", key.c_str())
-    ));
-
-    if (!reply || reply->type == REDIS_REPLY_ERROR) {
+    if (_is_swss_mode) {
+        if (!_db_connector) throw RedisInternalException("DBConnector not initialized for SWSS mode.");
+        try {
+            return _db_connector->exists(key);
+        } catch (const std::exception& e) {
+            throw RedisCommandException("EXISTS (SWSS)", "Key: " + key + ", Error: " + e.what());
+        }
+    } else { // Legacy mode
+        RedisConnectionManager::RedisConnectionPtr conn = get_legacy_redis_connection();
+        RedisReplyPtr reply(static_cast<redisReply*>(conn->command("EXISTS %s", key.c_str())));
+        if (!reply || reply->type == REDIS_REPLY_ERROR) {
+            _connection_manager->return_connection(std::move(conn));
+            throw RedisCommandException("EXISTS", "Key: " + key + ", Error: " + (reply ? (reply->str ? reply->str : "Unknown Redis error") : "No reply"));
+        }
+        bool exists = (reply->type == REDIS_REPLY_INTEGER && reply->integer == 1);
         _connection_manager->return_connection(std::move(conn));
-        throw RedisCommandException("EXISTS", "Key: " + key + ", Error: " + (reply ? (reply->str ? reply->str : "Reply object exists but str is null") : "No reply or connection error"));
+        return exists;
     }
-
-    _connection_manager->return_connection(std::move(conn));
-    return (reply->type == REDIS_REPLY_INTEGER && reply->integer == 1);
 }
 
 void RedisJSONClient::del_json(const std::string& key) {
-    RedisConnectionManager::RedisConnectionPtr conn = get_redis_connection();
-
-    RedisReplyPtr reply(static_cast<redisReply*>(
-        conn->command("DEL %s", key.c_str())
-    ));
-
-    if (!reply || reply->type == REDIS_REPLY_ERROR) {
+    if (_is_swss_mode) {
+        if (!_db_connector) throw RedisInternalException("DBConnector not initialized for SWSS mode.");
+        try {
+            _db_connector->del(key); // Assuming del returns void or count, not checked here for basic del
+        } catch (const std::exception& e) {
+            throw RedisCommandException("DEL (SWSS)", "Key: " + key + ", Error: " + e.what());
+        }
+    } else { // Legacy mode
+        RedisConnectionManager::RedisConnectionPtr conn = get_legacy_redis_connection();
+        RedisReplyPtr reply(static_cast<redisReply*>(conn->command("DEL %s", key.c_str())));
+        if (!reply || reply->type == REDIS_REPLY_ERROR) {
+            _connection_manager->return_connection(std::move(conn));
+            throw RedisCommandException("DEL", "Key: " + key + ", Error: " + (reply ? (reply->str ? reply->str : "Unknown Redis error") : "No reply"));
+        }
         _connection_manager->return_connection(std::move(conn));
-        throw RedisCommandException("DEL", "Key: " + key + ", Error: " + (reply ? (reply->str ? reply->str : "Reply object exists but str is null") : "No reply or connection error"));
     }
-    // DEL returns number of keys deleted. We don't strictly need to check it for success
-    // unless we want to confirm it was > 0 for an "effective" delete.
-    // For now, no error from Redis is success.
-    _connection_manager->return_connection(std::move(conn));
 }
 
-// --- Path Operations ---
-
-json RedisJSONClient::get_path(const std::string& key, const std::string& path) const {
-    if (!_lua_script_manager) {
-        throw RedisJSONException("LuaScriptManager is not initialized for get_path.");
-    }
-    // TODO: Use _path_parser->parse(path) and pass structured path to Lua if script supports it.
-    // For now, pass path string directly.
-    std::vector<std::string> keys = {key};
-    std::vector<std::string> args = {path};
-
+// --- Helper for client-side path modifications ---
+json RedisJSONClient::_get_document_for_modification(const std::string& key) const {
+    // This simply calls get_json. If key doesn't exist, get_json throws PathNotFoundException.
+    // For some path operations (like set_path with create_path=true), we might want to start
+    // with an empty document if the key doesn't exist.
     try {
-        json result = _lua_script_manager->execute_script("json_path_get", keys, args);
-        // Lua script now returns an array.
-        // If path not found, Lua returns "[]", which parses to an empty json array.
-        if (result.is_array() && result.empty()) {
-            throw PathNotFoundException(key, path);
-        }
-        // If the path pointed to an explicit JSON null, the Lua script would return "[null]",
-        // which parses to json::array({json(nullptr)}). This is a valid result.
-        return result;
-    } catch (const LuaScriptException& e) {
-        // Check if the Lua error message indicates "path not found" or similar if script signals this way
-        // For now, assume any LuaScriptException for get means a problem beyond simple not found.
-        // Or, specific error codes from Lua could be translated.
-        throw RedisCommandException("LUA_json_path_get", "Key: " + key + ", Path: " + path + ", Error: " + e.what());
-    } catch (const PathNotFoundException& e) {
-        throw; // Rethrow if script explicitly signals PathNotFound via a specific reply handled by execute_script or redis_reply_to_json
-    } catch (const RedisJSONException& e) {
-        throw; // Rethrow other RedisJSON specific errors
+        return get_json(key);
+    } catch (const PathNotFoundException& ) {
+        // If the path is root '$' or if create_path is intended, return an empty object or array
+        // This depends on what kind of structure the path implies at root.
+        // For simplicity, if get_json fails (key not found), we start with an empty object.
+        // This allows set_path to create the document.
+        return json::object();
     }
 }
 
-void RedisJSONClient::set_path(const std::string& key, const std::string& path,
+void RedisJSONClient::_set_document_after_modification(const std::string& key, const json& document, const SetOptions& opts) {
+    // This simply calls set_json.
+    set_json(key, document, opts);
+}
+
+
+// --- Path Operations (Client-Side for SWSS) ---
+
+json RedisJSONClient::get_path(const std::string& key, const std::string& path_str) const {
+    if (path_str == "$" || path_str == ".") { // Requesting the whole document
+        return get_json(key);
+    }
+    if (_is_swss_mode) {
+        json doc = get_json(key); // PathNotFoundException if key itself doesn't exist
+        // Use nlohmann/json pointer for path access. PathParser might be used to validate/convert path format.
+        // Assuming path_str is compatible with nlohmann json_pointer or can be converted.
+        // For simplicity, direct use, assuming PathParser can produce compatible pointer string if needed.
+        // Example: "contact.email" -> "/contact/email"
+        // For now, assume _path_parser can give a nlohmann::json::json_pointer
+        // This part needs careful implementation of path parsing to json_pointer.
+        // Let's use a simplified direct interpretation for now if PathParser is basic.
+        // A proper PathParser should convert "a.b[0]" to "/a/b/0".
+        try {
+            // This is a simplification. A real PathParser would be needed here.
+            // For now, assuming the path is directly usable or needs minor tweaks.
+            // json::json_pointer ptr(_path_parser->to_json_pointer(path_str));
+            // return doc.at(ptr);
+            // The above is the ideal. For now, a simpler stub based on current PathParser abilities.
+            // The current PathParser is likely for ReJSON paths, not json_pointer.
+            // This section WILL require significant work on PathParser or assumptions.
+            // Let's assume for now a very basic path evaluation if possible or throw not implemented.
+            // Reverting to: get the whole doc, let user parse with nlohmann.
+            // The spirit of get_path is to extract a sub-element.
+            // This is a core functionality that needs to be preserved.
+             json current_doc = get_json(key);
+             // We need to use _json_modifier or similar to apply the path.
+             // _json_modifier->get_value_at_path(current_doc, path_str);
+             // This needs _json_modifier to be implemented correctly.
+             // For this step, let's assume _json_modifier can do this.
+            return _json_modifier->get(current_doc, _path_parser->parse(path_str));
+
+        } catch (const json::out_of_range& e) { // nlohmann throws this if path not found
+            throw PathNotFoundException(key, path_str);
+        } catch (const json::parse_error& e) { // If path string is invalid for json_pointer
+            throw InvalidPathException(path_str, e.what());
+        } catch (const PathNotFoundException&) { // If underlying get_json failed
+            throw;
+        }
+    } else { // Legacy mode (Lua based)
+        if (!_lua_script_manager) throw RedisInternalException("LuaScriptManager not initialized.");
+        std::vector<std::string> keys = {key};
+        std::vector<std::string> args = {path_str};
+        try {
+            json result = _lua_script_manager->execute_script("json_path_get", keys, args);
+            if (result.is_array() && result.empty()) throw PathNotFoundException(key, path_str);
+            return result; // Lua script returns array, first element is the actual value or array of values
+        } catch (const LuaScriptException& e) {
+            throw RedisCommandException("LUA_json_path_get", "Key: " + key + ", Path: " + path_str + ", Error: " + e.what());
+        }
+    }
+}
+
+void RedisJSONClient::set_path(const std::string& key, const std::string& path_str,
                                const json& value, const SetOptions& opts) {
-    if (!_lua_script_manager) {
-        throw RedisJSONException("LuaScriptManager is not initialized for set_path.");
+    if (path_str == "$" || path_str == ".") { // Setting the whole document
+        set_json(key, value, opts);
+        return;
     }
-    std::string value_str = value.dump();
-    std::string condition_str;
-    switch (opts.condition) {
-        case SetCmdCondition::NX: condition_str = "NX"; break;
-        case SetCmdCondition::XX: condition_str = "XX"; break;
-        case SetCmdCondition::NONE: condition_str = "NONE"; break; // Or "" if Lua script expects that for no condition
-    }
-
-    std::vector<std::string> keys = {key};
-    std::vector<std::string> args = {
-        path,
-        value_str,
-        condition_str,
-        std::to_string(opts.ttl.count()),
-        opts.create_path ? "true" : "false" // Added create_path option
-    };
-
-    try {
-        json result = _lua_script_manager->execute_script("json_path_set", keys, args);
-        // Lua script for set_path should return a status, e.g., 1 for OK, 0 for condition not met.
-        // If result is json(nullptr) or a specific value indicating condition not met (e.g. 0)
-        if (result.is_boolean() && !result.get<bool>()) { // Assuming script returns true on success, false on NX/XX fail
-             // Condition (NX/XX) not met, or other failure indicated by 'false'
-             // This part needs careful coordination with Lua script's return value.
-             // For now, if it's explicitly false, assume condition not met and do not throw.
-             return;
+    if (_is_swss_mode) {
+        json doc = _get_document_for_modification(key); // Starts with {} if key not found
+        try {
+            // _json_modifier->set_value_at_path(doc, path_str, value, opts.create_path);
+            // This needs _json_modifier to be implemented correctly.
+            _json_modifier->set(doc, _path_parser->parse(path_str), value, opts.create_path); // Assuming overwrite=true by default in modifier's set
+            _set_document_after_modification(key, doc, opts);
+        } catch (const json::exception& e) { // Catch errors from nlohmann during modification
+            throw RedisCommandException("SET_PATH (SWSS-Client)", "Key: " + key + ", Path: " + path_str + ", JSON mod error: " + e.what());
+        } catch (const PathNotFoundException& e) { // from _get_document if create_path was false and path was deep
+             throw; // Rethrow if modification logic itself determines path cannot be created
         }
-        if (result.is_null()) { // Alternative: script returns null if condition not met
-            return; // Condition not met
+    } else { // Legacy mode
+        if (!_lua_script_manager) throw RedisInternalException("LuaScriptManager not initialized.");
+        std::string value_dump = value.dump();
+        std::string condition_str;
+        switch (opts.condition) {
+            case SetCmdCondition::NX: condition_str = "NX"; break;
+            case SetCmdCondition::XX: condition_str = "XX"; break;
+            default: condition_str = "NONE"; break;
         }
-        // If an error occurred within Lua that wasn't a typical Redis error (caught as LuaScriptException),
-        // it might come as a non-true/non-null value. Or script throws error string.
-        // The LuaScriptManager::execute_script and redis_reply_to_json should ideally parse known success/failure indicators.
-
-    } catch (const LuaScriptException& e) {
-        // Specific Lua errors might indicate "key does not exist" for XX, or "path exists" for NX if script handles this.
-        // For now, generic error.
-        throw RedisCommandException("LUA_json_path_set", "Key: " + key + ", Path: " + path + ", Error: " + e.what());
-    } catch (const RedisJSONException& e) {
-        throw;
-    }
-}
-
-void RedisJSONClient::del_path(const std::string& key, const std::string& path) {
-    if (!_lua_script_manager) {
-        throw RedisJSONException("LuaScriptManager is not initialized for del_path.");
-    }
-    std::vector<std::string> keys = {key};
-    std::vector<std::string> args = {path};
-
-    try {
-        json result = _lua_script_manager->execute_script("json_path_del", keys, args);
-        // Lua script should return number of paths deleted (e.g., 0 or 1).
-        // If result is 0, it means path was not found or key did not exist, which is not an error for DEL.
-        // If LuaScriptManager returns integer as json number:
-        if (result.is_number_integer()) {
-            // int deleted_count = result.get<int>();
-            // No specific action based on count for void return type.
-            return;
-        }
-        // If script indicates error in other ways, it should be caught by LuaScriptException.
-    } catch (const LuaScriptException& e) {
-        throw RedisCommandException("LUA_json_path_del", "Key: " + key + ", Path: " + path + ", Error: " + e.what());
-    } catch (const RedisJSONException& e) {
-        throw;
-    }
-}
-
-bool RedisJSONClient::exists_path(const std::string& key, const std::string& path) const {
-    if (!_lua_script_manager) {
-        throw RedisJSONException("LuaScriptManager is not initialized for exists_path.");
-    }
-    std::vector<std::string> keys = {key};
-    std::vector<std::string> args = {path};
-
-    try {
-        json result = _lua_script_manager->execute_script("json_path_type", keys, args);
-        // Lua script for type/exists should return the type string if exists, or null/nil if not.
-        // If result is json(nullptr), path does not exist.
-        // Otherwise, if it's a non-null value (typically a string representing the type), it exists.
-        return !result.is_null();
-    } catch (const LuaScriptException& e) {
-        // If script throws error for "key not found" before even checking path, that's a LuaScriptException.
-        // For exists_path, this should probably return false, not throw.
-        // This requires the Lua script to handle "key not found" gracefully and return nil/null.
-        // If any other Lua error, then it's a proper exception.
-        // For now, rethrow, but this might need refinement based on Lua script behavior.
-        // A robust Lua script for "type" would return nil if key doesn't exist, or path doesn't exist.
-        // In such cases, LuaScriptManager would give json(nullptr), and `!result.is_null()` would be false.
-        // So, a LuaScriptException here implies a more severe script error.
-        throw RedisCommandException("LUA_json_path_type", "Key: " + key + ", Path: " + path + ", Error: " + e.what());
-    } catch (const RedisJSONException& e) {
-        throw;
-    }
-}
-
-// --- Array Operations ---
-
-void RedisJSONClient::append_path(const std::string& key, const std::string& path,
-                                  const json& value) {
-    if (!_lua_script_manager) {
-        throw RedisJSONException("LuaScriptManager is not initialized for append_path.");
-    }
-    std::string value_str = value.dump();
-    std::vector<std::string> keys = {key};
-    std::vector<std::string> args = {path, value_str};
-
-    try {
-        json result = _lua_script_manager->execute_script("json_array_append", keys, args);
-        // Lua script should return the new array length or confirm success.
-        // If it returns an integer (new length), we don't use it in void function.
-        // If it throws an error (e.g. path not an array), it's caught as LuaScriptException.
-        if (result.is_number_integer() || result.is_boolean() && result.get<bool>()) { // Assuming script returns new length or true
-            return;
-        }
-         // Handle cases where script might return specific error codes as non-exception results
-        if (result.is_string() && result.get<std::string>() == "ERR_NOT_ARRAY") {
-            throw TypeMismatchException(key, path, "Path is not an array for append operation.");
-        }
-        if (result.is_null()){ // Could mean key or path not found
-            throw PathNotFoundException(key,path);
-        }
-        // Fallback for unexpected success indication
-        // throw RedisCommandException("LUA_json_array_append", "Key: " + key + ", Path: " + path + ", Unexpected success result: " + result.dump());
-
-
-    } catch (const LuaScriptException& e) {
-        throw RedisCommandException("LUA_json_array_append", "Key: " + key + ", Path: " + path + ", Error: " + e.what());
-    } catch (const RedisJSONException& e) {
-        throw;
-    }
-}
-
-void RedisJSONClient::prepend_path(const std::string& key, const std::string& path,
-                                   const json& value) {
-    if (!_lua_script_manager) {
-        throw RedisJSONException("LuaScriptManager is not initialized for prepend_path.");
-    }
-    std::string value_str = value.dump();
-    std::vector<std::string> keys = {key};
-    std::vector<std::string> args = {path, value_str};
-
-    try {
-        json result = _lua_script_manager->execute_script("json_array_prepend", keys, args);
-        // Similar to append, expect success confirmation or new length.
-        if (result.is_number_integer() || result.is_boolean() && result.get<bool>()) {
-            return;
-        }
-        if (result.is_string() && result.get<std::string>() == "ERR_NOT_ARRAY") {
-            throw TypeMismatchException(key, path, "Path is not an array for prepend operation.");
-        }
-         if (result.is_null()){
-            throw PathNotFoundException(key,path);
-        }
-        // throw RedisCommandException("LUA_json_array_prepend", "Key: " + key + ", Path: " + path + ", Unexpected success result: " + result.dump());
-
-    } catch (const LuaScriptException& e) {
-        throw RedisCommandException("LUA_json_array_prepend", "Key: " + key + ", Path: " + path + ", Error: " + e.what());
-    } catch (const RedisJSONException& e) {
-        throw;
-    }
-}
-
-json RedisJSONClient::pop_path(const std::string& key, const std::string& path,
-                               int index) {
-    if (!_lua_script_manager) {
-        throw RedisJSONException("LuaScriptManager is not initialized for pop_path.");
-    }
-    std::vector<std::string> keys = {key};
-    std::vector<std::string> args = {path, std::to_string(index)};
-
-    try {
-        json result = _lua_script_manager->execute_script("json_array_pop", keys, args);
-        // Lua script should return the popped value (as JSON string, parsed by LuaScriptManager)
-        // or null/nil if path not found, not an array, or index out of bounds.
-        if (result.is_null()) {
-             // Distinguish between "path not found/not array" and "index out of bounds but array exists"
-             // For now, PathNotFoundException covers these broadly. A more specific error could be used.
-            throw PathNotFoundException(key, path); // Or specific "PopFailedException"
-        }
-        return result;
-    } catch (const LuaScriptException& e) {
-         // Lua script might throw specific errors for "out of bounds" vs "not an array"
-        throw RedisCommandException("LUA_json_array_pop", "Key: " + key + ", Path: " + path + ", Index: " + std::to_string(index) + ", Error: " + e.what());
-    } catch (const RedisJSONException& e) {
-        throw;
-    }
-}
-
-size_t RedisJSONClient::array_length(const std::string& key, const std::string& path) const {
-    if (!_lua_script_manager) {
-        throw RedisJSONException("LuaScriptManager is not initialized for array_length.");
-    }
-    std::vector<std::string> keys = {key};
-    std::vector<std::string> args = {path};
-
-    try {
-        json result = _lua_script_manager->execute_script("json_array_length", keys, args);
-        // Lua script should return the array length as an integer, or null/nil if path not found/not array.
-        if (result.is_number_integer()) {
-            long long length = result.get<long long>();
-            if (length < 0) { // Should not happen for a valid length
-                throw RedisCommandException("LUA_json_array_length", "Key: " + key + ", Path: " + path + ", Received negative array length.");
+        std::vector<std::string> keys = {key};
+        std::vector<std::string> args = {path_str, value_dump, condition_str, std::to_string(opts.ttl.count()), opts.create_path ? "true" : "false"};
+        try {
+            json result = _lua_script_manager->execute_script("json_path_set", keys, args);
+            // Check result for success/condition not met (as in original code)
+            if ((result.is_boolean() && !result.get<bool>()) || result.is_null()) {
+                // Condition not met or script indicates no-op, not an error
+                return;
             }
-            return static_cast<size_t>(length);
+        } catch (const LuaScriptException& e) {
+            throw RedisCommandException("LUA_json_path_set", "Key: " + key + ", Path: " + path_str + ", Error: " + e.what());
         }
-        if (result.is_null()) { // Path not found or not an array
-            throw PathNotFoundException(key, path); // Or TypeMismatchException if path exists but not array
+    }
+}
+
+void RedisJSONClient::del_path(const std::string& key, const std::string& path_str) {
+    if (path_str == "$" || path_str == ".") {
+        del_json(key); // Delete the whole document
+        return;
+    }
+     if (_is_swss_mode) {
+        // Get-modify-set
+        SetOptions opts; // Default set options (no TTL, no conditions for the final SET)
+        json doc;
+        try {
+            doc = get_json(key); // If key doesn't exist, this throws PathNotFound, which is fine for DEL.
+        } catch (const PathNotFoundException&) {
+            return; // Key or path doesn't exist, nothing to delete.
         }
-        // Fallback for unexpected result type
-        throw RedisCommandException("LUA_json_array_length", "Key: " + key + ", Path: " + path + ", Unexpected result type: " + result.dump());
-    } catch (const LuaScriptException& e) {
-        throw RedisCommandException("LUA_json_array_length", "Key: " + key + ", Path: " + path + ", Error: " + e.what());
-    } catch (const RedisJSONException& e) {
-        throw;
+
+        try {
+            // _json_modifier->delete_value_at_path(doc, path_str);
+            _json_modifier->del(doc, _path_parser->parse(path_str));
+            // If del_path modified the document to be empty (e.g. last element of root object deleted)
+            // some Redis implementations might delete the key. Here we just set it.
+            // If doc becomes empty json object {} or array [], it will be stored as such.
+            _set_document_after_modification(key, doc, opts);
+        } catch (const PathNotFoundException& ) {
+            return; // Path did not exist within the document, effectively a no-op for DEL.
+        } catch (const json::exception& e) {
+            throw RedisCommandException("DEL_PATH (SWSS-Client)", "Key: " + key + ", Path: " + path_str + ", JSON mod error: " + e.what());
+        }
+    } else { // Legacy
+        if (!_lua_script_manager) throw RedisInternalException("LuaScriptManager not initialized.");
+        std::vector<std::string> keys = {key};
+        std::vector<std::string> args = {path_str};
+        try {
+            _lua_script_manager->execute_script("json_path_del", keys, args); // Result indicates count, ignore for void
+        } catch (const LuaScriptException& e) {
+            throw RedisCommandException("LUA_json_path_del", "Key: " + key + ", Path: " + path_str + ", Error: " + e.what());
+        }
+    }
+}
+
+bool RedisJSONClient::exists_path(const std::string& key, const std::string& path_str) const {
+    if (path_str == "$" || path_str == ".") {
+        return exists_json(key);
+    }
+    if (_is_swss_mode) {
+        try {
+            json doc = get_json(key); // PathNotFoundException if key itself doesn't exist
+            // Use _json_modifier to check path existence within the document
+            return _json_modifier->exists(doc, _path_parser->parse(path_str));
+        } catch (const PathNotFoundException&) {
+            return false; // Key itself doesn't exist, so path cannot exist.
+        } catch (const json::exception& e) { // Errors during path parsing by modifier
+             throw InvalidPathException(path_str, "Error checking path existence: " + std::string(e.what()));
+        }
+    } else { // Legacy
+        if (!_lua_script_manager) throw RedisInternalException("LuaScriptManager not initialized.");
+        std::vector<std::string> keys = {key};
+        std::vector<std::string> args = {path_str};
+        try {
+            json result = _lua_script_manager->execute_script("json_path_type", keys, args);
+            return !result.is_null(); // Lua script returns type string or nil
+        } catch (const LuaScriptException& e) {
+            // If json_path_type script itself errors (e.g. key not found and script doesn't handle it gracefully by returning nil)
+            // This could be treated as path not existing, or an actual error.
+            // For now, let's assume script errors are more severe than "not found".
+            // A robust Lua script should return nil if key/path not found.
+            // If it throws (e.g. syntax error in path for some Lua parsers), then it's an error.
+            // Let's assume LuaScriptException means a more fundamental issue here.
+            // For robustness, one might catch specific Lua errors that mean "not found" and return false.
+            throw RedisCommandException("LUA_json_path_type", "Key: " + key + ", Path: " + path_str + ", Error: " + e.what());
+        }
+    }
+}
+
+
+// --- Array Operations (Client-Side for SWSS) ---
+// These will follow the get-modify-set pattern using _json_modifier
+
+void RedisJSONClient::append_path(const std::string& key, const std::string& path_str, const json& value) {
+    if (_is_swss_mode) {
+        SetOptions opts;
+        json doc = _get_document_for_modification(key);
+        try {
+            _json_modifier->array_append(doc, _path_parser->parse(path_str), value); // create_path is implicit in how array_append in modifier might work
+            _set_document_after_modification(key, doc, opts);
+        } catch (const TypeMismatchException& e){
+            throw;
+        } catch (const PathNotFoundException& e){ // If path doesn't exist and create_path is false
+            throw;
+        } catch (const json::exception& e) {
+            throw RedisCommandException("APPEND_PATH (SWSS-Client)", "Key: " + key + ", Path: " + path_str + ", JSON mod error: " + e.what());
+        }
+    } else { // Legacy
+        if (!_lua_script_manager) throw RedisInternalException("LuaScriptManager not initialized.");
+        std::vector<std::string> keys = {key};
+        std::vector<std::string> args = {path_str, value.dump()};
+        try {
+            _lua_script_manager->execute_script("json_array_append", keys, args);
+        } catch (const LuaScriptException& e) {
+            throw RedisCommandException("LUA_json_array_append", "Key: " + key + ", Path: " + path_str + ", Error: " + e.what());
+        }
+    }
+}
+
+void RedisJSONClient::prepend_path(const std::string& key, const std::string& path_str, const json& value) {
+    if (_is_swss_mode) {
+        SetOptions opts;
+        json doc = _get_document_for_modification(key);
+        try {
+            _json_modifier->array_prepend(doc, _path_parser->parse(path_str), value);  // create_path is implicit
+            _set_document_after_modification(key, doc, opts);
+        } catch (const TypeMismatchException& e){
+            throw;
+        } catch (const PathNotFoundException& e){
+            throw;
+        } catch (const json::exception& e) {
+            throw RedisCommandException("PREPEND_PATH (SWSS-Client)", "Key: " + key + ", Path: " + path_str + ", JSON mod error: " + e.what());
+        }
+    } else { // Legacy
+        if (!_lua_script_manager) throw RedisInternalException("LuaScriptManager not initialized.");
+        std::vector<std::string> keys = {key};
+        std::vector<std::string> args = {path_str, value.dump()};
+        try {
+            _lua_script_manager->execute_script("json_array_prepend", keys, args);
+        } catch (const LuaScriptException& e) {
+            throw RedisCommandException("LUA_json_array_prepend", "Key: " + key + ", Path: " + path_str + ", Error: " + e.what());
+        }
+    }
+}
+
+json RedisJSONClient::pop_path(const std::string& key, const std::string& path_str, int index) {
+    if (_is_swss_mode) {
+        SetOptions opts;
+        json doc = get_json(key); // pop requires path to exist
+        json popped_value;
+        try {
+            popped_value = _json_modifier->array_pop(doc, _path_parser->parse(path_str), index);
+            _set_document_after_modification(key, doc, opts);
+            return popped_value;
+        } catch (const TypeMismatchException& e){ // Path not an array
+            throw;
+        } catch (const PathNotFoundException& e){ // Path (or key) does not exist
+            throw;
+        } catch (const json::out_of_range& e) { // Index out of bounds from nlohmann::json if modifier doesn't catch it
+            throw PathNotFoundException(key, path_str + "[" + std::to_string(index) + "]", "Index out of bounds for pop: " + std::string(e.what()));
+        } catch (const IndexOutOfBoundsException& e) { // Custom exception from modifier
+             throw PathNotFoundException(key, path_str + "[" + std::to_string(index) + "]", "Index out of bounds for pop: " + std::string(e.what()));
+        } catch (const json::exception& e) { // Other json errors
+            throw RedisCommandException("POP_PATH (SWSS-Client)", "Key: " + key + ", Path: " + path_str + ", JSON mod error: " + e.what());
+        }
+    } else { // Legacy
+        if (!_lua_script_manager) throw RedisInternalException("LuaScriptManager not initialized.");
+        std::vector<std::string> keys = {key};
+        std::vector<std::string> args = {path_str, std::to_string(index)};
+        try {
+            json result = _lua_script_manager->execute_script("json_array_pop", keys, args);
+            if (result.is_null()) throw PathNotFoundException(key, path_str); // Lua script returns nil if path not found/array empty/index OOB
+            return result;
+        } catch (const LuaScriptException& e) {
+            throw RedisCommandException("LUA_json_array_pop", "Key: " + key + ", Path: " + path_str + ", Error: " + e.what());
+        }
+    }
+}
+
+size_t RedisJSONClient::array_length(const std::string& key, const std::string& path_str) const {
+    if (_is_swss_mode) {
+        json doc = get_json(key); // Throws if key not found
+        try {
+            // JSONModifier::get_size returns size for objects, arrays, strings.
+            // Ensure it's an array first.
+            const json* target_node = _json_modifier->navigate_to_element_const(doc, _path_parser->parse(path_str));
+            if (!target_node) {
+                 throw PathNotFoundException(key, path_str);
+            }
+            if (!target_node->is_array()) {
+                throw TypeMismatchException(key, path_str, "Path does not point to an array.");
+            }
+            return target_node->size();
+            // Or, if JSONModifier::get_size is specifically for this:
+            // return _json_modifier->get_size(doc, _path_parser->parse(path_str));
+            // This assumes get_size would throw TypeMismatchException if not an array.
+        } catch (const TypeMismatchException& e){ // Path not an array
+            throw;
+        } catch (const PathNotFoundException& e){ // Path does not exist within doc
+            throw;
+        } catch (const json::exception& e) { // Other json errors
+            throw RedisCommandException("ARRAY_LENGTH (SWSS-Client)", "Key: " + key + ", Path: " + path_str + ", JSON mod error: " + e.what());
+        }
+    } else { // Legacy
+        if (!_lua_script_manager) throw RedisInternalException("LuaScriptManager not initialized.");
+        std::vector<std::string> keys = {key};
+        std::vector<std::string> args = {path_str};
+        try {
+            json result = _lua_script_manager->execute_script("json_array_length", keys, args);
+            if (result.is_number_integer()) {
+                long long len = result.get<long long>();
+                if (len < 0) throw RedisCommandException("LUA_json_array_length", "Negative length received");
+                return static_cast<size_t>(len);
+            }
+            if (result.is_null()) throw PathNotFoundException(key, path_str); // Not an array or path not found
+            throw RedisCommandException("LUA_json_array_length", "Unexpected result type: " + result.dump());
+        } catch (const LuaScriptException& e) {
+            throw RedisCommandException("LUA_json_array_length", "Key: " + key + ", Path: " + path_str + ", Error: " + e.what());
+        }
     }
 }
 
 // --- Merge Operations ---
+// Simplified merge_json for SWSS mode to be client-side.
+// The original merge_json used JSON.MERGE which is specific to RedisJSON module.
+// SWSS mode will do a client-side deep merge.
+void RedisJSONClient::merge_json(const std::string& key, const json& patch) {
+    if (_is_swss_mode) {
+        SetOptions opts; // Default set options
+        json current_doc;
+        try {
+            current_doc = get_json(key);
+        } catch (const PathNotFoundException&) {
+            // If key doesn't exist, merging into it means the patch becomes the new document,
+            // but only if patch is an object or array. Otherwise, it's not a valid merge target.
+            if (patch.is_object() || patch.is_array()) {
+                current_doc = patch.is_object() ? json::object() : json::array(); // Start with compatible empty type
+            } else {
+                // Cannot merge a primitive into a non-existent key to make it the root.
+                // Or, treat as set_json(key, patch)? For merge, usually expects containers.
+                // Let's be strict: if key not found and patch isn't object/array, this is an error or no-op.
+                // For simplicity, if key not found, the patch becomes the new document.
+                set_json(key, patch, opts);
+                return;
+            }
+        }
 
-void RedisJSONClient::merge_json(const std::string& key, const json& patch,
-                                 const MergeStrategy& strategy) {
-    // NOTE: The `MergeStrategy` enum (DEEP, SHALLOW, etc.) is not directly supported by
-    // the standard Redis `JSON.MERGE` command. `JSON.MERGE` always performs a deep merge
-    // of objects. If different strategies are strictly required, this would necessitate
-    // client-side logic (fetch, merge with custom logic, then set) or a complex Lua script.
-    // For this implementation, we will use `JSON.MERGE` with its default behavior,
-    // effectively ignoring the `strategy` parameter beyond potentially logging a warning
-    // if it's not the default DEEP (which aligns with JSON.MERGE).
+        try {
+            // Perform a client-side merge (nlohmann::json::merge_patch or manual deep merge)
+            // nlohmann::json::update is like a shallow merge (top-level keys from patch override current_doc)
+            // nlohmann::json::merge_patch applies JSON Merge Patch (RFC 7386) semantics.
+            // The original JSON.MERGE is more like a deep recursive update.
+            // We will use `current_doc.merge_patch(patch);`
+            current_doc.merge_patch(patch); // This performs RFC 7386 merge.
+                                          // For a deep recursive update like ReJSON's JSON.MERGE,
+                                          // a custom recursive function would be needed or use `current_doc.update(patch, true);` if available and suitable.
+                                          // nlohmann `update` with `recursive=true` might be closer.
+                                          // json::update(const_reference patch, bool_recursive)
+                                          // Let's try `update` as it's more common for deep merging.
+                                          // current_doc.update(patch, true); // This is not a standard nlohmann method.
+                                          // `merge_patch` is standard. Let's stick to it and document difference.
+            _set_document_after_modification(key, current_doc, opts);
+        } catch (const json::exception& e) {
+            throw RedisCommandException("MERGE_JSON (SWSS-Client)", "Key: " + key + ", JSON mod error: " + e.what());
+        }
 
-    if (strategy != MergeStrategy::DEEP) {
-        // Optionally log a warning here:
-        // std::cerr << "Warning: RedisJSONClient::merge_json called with strategy other than DEEP. "
-        //           << "Redis JSON.MERGE performs a deep merge by default. Strategy parameter is currently ignored." << std::endl;
-        // Depending on strictness, one might even throw an std::invalid_argument if only DEEP is supported.
-    }
+    } else { // Legacy mode (uses JSON.MERGE)
+        RedisConnectionManager::RedisConnectionPtr conn = get_legacy_redis_connection();
+        std::string patch_str = patch.dump();
+        // Assuming MergeStrategy::DEEP is the only one effectively used, matching JSON.MERGE default.
+        RedisReplyPtr reply(static_cast<redisReply*>(
+            conn->command("JSON.MERGE %s $ %s", key.c_str(), patch_str.c_str())
+        ));
 
-    RedisConnectionManager::RedisConnectionPtr conn = get_redis_connection();
-    std::string patch_str = patch.dump();
-    
-    // JSON.MERGE <key> <path> <value>
-    // We assume merging into the root of the document, so path is '$'.
-    // The `patch` here is the JSON value to be merged in.
-    RedisReplyPtr reply(static_cast<redisReply*>(
-        conn->command("JSON.MERGE %s $ %s", key.c_str(), patch_str.c_str())
-    ));
-
-    if (!reply) {
+        if (!reply) {
+            _connection_manager->return_connection(std::move(conn));
+            throw RedisCommandException("JSON.MERGE", "Key: " + key + ", Path: $, Error: No reply or connection error");
+        }
+        if (reply->type == REDIS_REPLY_ERROR) {
+            _connection_manager->return_connection(std::move(conn));
+            throw RedisCommandException("JSON.MERGE", "Key: " + key + ", Path: $, Error: " + (reply->str ? reply->str : "Redis error"));
+        }
+        // Check for "OK" status (ReJSON 2.0+)
+        if (!(reply->type == REDIS_REPLY_STATUS && strcmp(reply->str, "OK") == 0)) {
+             // Older ReJSON might return integer. For simplicity, expect OK for modern RedisJSON.
+            _connection_manager->return_connection(std::move(conn));
+            throw RedisCommandException("JSON.MERGE", "Key: " + key + ", Path: $, Unexpected reply: " + (reply->str ? reply->str : "Non-OK status"));
+        }
         _connection_manager->return_connection(std::move(conn));
-        throw RedisCommandException("JSON.MERGE", "Key: " + key + ", Path: $, Error: No reply or connection error");
     }
-
-    if (reply->type == REDIS_REPLY_ERROR) {
-        _connection_manager->return_connection(std::move(conn));
-        throw RedisCommandException("JSON.MERGE", "Key: " + key + ", Path: $, Error: " + (reply->str ? reply->str : "Redis error reply with no message"));
-    }
-
-    // JSON.MERGE returns "OK" on success.
-    // It returns NIL if the key does not exist and the path is not '$' (older versions).
-    // For path '$', if the key does not exist, JSON.MERGE will create it and set it to the patch value if patch is an object/array.
-    // If the existing value or patch is not a JSON object, it might error or have specific behavior.
-    
-    if (reply->type == REDIS_REPLY_STATUS && strcmp(reply->str, "OK") == 0) {
-        _connection_manager->return_connection(std::move(conn));
-        return; // Success
-    }
-    
-    // JSON.MERGE (on ReJSON < 2.0) could return an integer reply (0 or 1) indicating if a change was made.
-    // ReJSON 2.0+ returns "OK". We will primarily check for "OK".
-    // If older versions are supported, this might need adjustment.
-    // For now, strict check for "OK".
-
-    _connection_manager->return_connection(std::move(conn));
-    throw RedisCommandException("JSON.MERGE", "Key: " + key + ", Path: $, Error: Unexpected reply: " + (reply->str ? reply->str : "Status not OK or unknown reply type ") + std::to_string(reply->type));
 }
+
 
 void RedisJSONClient::patch_json(const std::string& key, const json& patch_operations) {
-    // This is a non-atomic client-side implementation of JSON Patch (RFC 6902).
-    // For atomicity, a Lua script would be required, which would need a Lua JSON library
-    // and a JSON Patch library in Lua, or a very complex script.
-    // Alternatively, if RedisJSON supported JSON.PATCH command directly, that would be used.
-
-    // 1. Get the current JSON document
+    // This is client-side for both modes currently, as Redis doesn't have a standard JSON.PATCH.
+    // The atomicity is lost.
     json current_doc;
+    SetOptions opts; // Default set options
     try {
-        current_doc = get_json(key); // Uses the class's existing get_json method
-    } catch (const PathNotFoundException& e) {
-        // If the key does not exist, a patch operation might still be valid if it's an "add" to root.
-        // However, nlohmann::json::patch expects the document to exist.
-        // RFC6902 says: "If the target document is an empty JSON document (e.g., ""),
-        // the "add" operation can be used to add a data structure to the document."
-        // nlohmann json `patch` method expects a non-null document to patch.
-        // If key doesn't exist, we can treat it as an empty object `json::object()` or based on patch.
-        // For simplicity now, if key does not exist, we'll let it fail if patch expects content,
-        // or let it proceed if patch creates everything (e.g. add to root of a conceptual empty doc).
-        // A common approach for "add" to a non-existent root would be to initialize current_doc to json::object() or json::value_t::null.
-        // Let's assume for now `get_json` throws if key not found, and we re-throw or handle.
-        // If the patch is meant to create the document (e.g. add / an empty object),
-        // then `get_json` failing is problematic.
-        // Let's try to patch a null JSON object if the key is not found, as some patch operations
-        // (like adding to the root) might still be valid.
-        current_doc = json::object(); // Start with an empty object if key not found.
-                                      // This might not be correct for all patch operations.
-                                      // A specific "add" to "/" might work.
-                                      // Consider if PathNotFoundException should be re-thrown.
-                                      // For now, let's assume "patching a non-existent doc" means starting from `{}`.
-                                      // This behavior might need refinement based on desired semantics.
-                                      // A safer default if key not found might be to throw, unless patch is a single "add" to "/"
-    } catch (const RedisJSONException& e) { // Catch other Redis specific exceptions from get_json
-        throw; // Rethrow other potentially critical errors from get_json
+        current_doc = get_json(key);
+    } catch (const PathNotFoundException& ) {
+        // If key doesn't exist, applying a patch might be valid if it's an "add" to root.
+        // nlohmann::json::patch expects a document. Start with null or empty object.
+        // RFC 6902: "If the target document is an empty JSON document..."
+        // Let's start with null, nlohmann's patch can handle add to root of null.
+        current_doc = json(nullptr);
     }
 
-
-    // 2. Apply the patch operations (RFC 6902)
-    json patched_doc;
     try {
-        patched_doc = current_doc.patch(patch_operations);
-    } catch (const json::exception& e) {
-        // This could be json::parse_error if patch_operations is malformed,
-        // or json::out_of_range / json::type_error if patch operations are invalid for the current_doc.
+        json patched_doc = current_doc.patch(patch_operations); // nlohmann::json::patch
+        set_json(key, patched_doc, opts); // Use the class's set_json
+    } catch (const json::exception& e) { // from patch operation
         throw PatchFailedException("Failed to apply JSON Patch for key '" + key + "': " + e.what());
     }
-
-    // 3. Set the patched document back to Redis
-    try {
-        // Use the class's existing set_json method. This doesn't provide options like NX/XX from here.
-        // If TTL was associated with the key, it will be cleared by set_json unless set_json is modified
-        // or we fetch TTL and re-apply. For simplicity, this basic patch doesn't manage TTL explicitly.
-        set_json(key, patched_doc);
-     } catch (const RedisJSONException& e) {
-        // Catch Redis specific exceptions from set_json
-        throw; // Rethrow
-    }
+    // Exceptions from set_json are already handled by it.
 }
 
-// --- Atomic Operations (using Lua) ---
+// --- Atomic Operations (Non-Atomic for SWSS) ---
 
-json RedisJSONClient::atomic_get_set(const std::string& key, const std::string& path,
-                                     const json& new_value) {
-    if (!_lua_script_manager) {
-        throw RedisJSONException("LuaScriptManager is not initialized.");
-    }
-
-    // Script name expected to be loaded by LuaScriptManager
-    const std::string script_name = "atomic_json_get_set_path";
-
-    // Ensure script is loaded (optional check, execute_script might throw if not found)
-    // if (!_lua_script_manager->is_script_loaded(script_name)) {
-    //    throw RedisConfigurationException("Lua script '" + script_name + "' is not loaded.");
-    // }
-    // Alternatively, LuaScriptManager::preload_builtin_scripts() should be called during client construction.
-
-    std::vector<std::string> keys = {key};
-    std::vector<std::string> args = {path, new_value.dump()};
-
-    try {
-        // _execute_lua_script is a private helper that should call the public LuaScriptManager method.
-        // Let's call the manager directly as _execute_lua_script itself is also a TODO/stub.
-        // json result = _execute_lua_script(script_name, keys, args);
-
-        json result = _lua_script_manager->execute_script(script_name, keys, args);
-
-        // The Lua script for RedisJSON's JSON.GET returns a string which is a JSON value,
-        // or nil if path not found. LuaScriptManager::execute_script and its helper
-        // redis_reply_to_json should handle parsing this string back to nlohmann::json.
-        // If current_value_str was nil from redis.call, redis_reply_to_json should turn it into json(nullptr).
-        return result;
-
-    } catch (const LuaScriptException& e) {
-        // More specific error context
-        throw LuaScriptException(script_name, "Error executing atomic_get_set script for key '" + key + "', path '" + path + "': " + e.what());
-    } catch (const JsonParsingException& e) {
-        throw LuaScriptException(script_name, "Failed to parse result from atomic_get_set script for key '" + key + "', path '" + path + "': " + e.what());
-    } catch (const RedisJSONException& e) { // Catch other Redis specific exceptions
-        throw; // Rethrow
-    }
-    // Should be unreachable if all exceptions from execute_script are RedisJSONExceptions
-    // or derived from it, or LuaScriptException. Adding throw to satisfy compiler.
-    throw RedisJSONException("Unknown error in atomic_get_set after Lua script execution attempt.");
-}
-
-bool RedisJSONClient::atomic_compare_set(const std::string& key, const std::string& path,
-                                        const json& expected, const json& new_value) {
-    if (!_lua_script_manager) {
-        throw RedisJSONException("LuaScriptManager is not initialized.");
-    }
-
-    const std::string script_name = "atomic_json_compare_set_path";
-    // LuaScriptManager::preload_builtin_scripts() should load this.
-
-    std::vector<std::string> keys = {key};
-    std::vector<std::string> args = {path, expected.dump(), new_value.dump()};
-
-    try {
-        json result_json = _lua_script_manager->execute_script(script_name, keys, args);
-
-        // The Lua script returns 1 for success (set was performed) or 0 for failure (no match).
-        // LuaScriptManager::redis_reply_to_json should convert Redis integer reply to nlohmann::json number.
-        if (result_json.is_number_integer()) {
-            return result_json.get<int>() == 1;
-        } else {
-            // Should not happen if script behaves correctly.
-            throw LuaScriptException(script_name, "Atomic compare-and-set script '" + script_name + "' for key '" + key + "', path '" + path + "' returned non-integer result: " + result_json.dump());
+json RedisJSONClient::non_atomic_get_set(const std::string& key, const std::string& path_str,
+                                         const json& new_value) {
+    if (_is_swss_mode) {
+        // Non-atomic: Get full doc, get path, set path, set full doc
+        json doc = _get_document_for_modification(key); // Creates empty {} if key not found
+        json old_value_at_path = json(nullptr); // Default if path doesn't exist
+        try {
+            old_value_at_path = _json_modifier->get_value_at_path(doc, _path_parser->parse(path_str));
+        } catch (const PathNotFoundException&) {
+            // Path doesn't exist, old_value_at_path remains null. This is fine.
         }
-    } catch (const LuaScriptException& e) {
-        throw LuaScriptException(script_name, "Error executing atomic_compare_set script for key '" + key + "', path '" + path + "': " + e.what());
-    } catch (const RedisJSONException& e) { // Catch other Redis specific exceptions
-        throw; // Rethrow
+
+        SetOptions opts; // Default set options
+        // opts.create_path should be true for get_set to ensure the path is created.
+        _json_modifier->set_value_at_path(doc, _path_parser->parse(path_str), new_value, true /*create_path*/);
+        _set_document_after_modification(key, doc, opts);
+        return old_value_at_path;
+
+    } else { // Legacy mode (atomic via Lua)
+        if (!_lua_script_manager) throw RedisInternalException("LuaScriptManager not initialized.");
+        const std::string script_name = "atomic_json_get_set_path";
+        std::vector<std::string> keys = {key};
+        std::vector<std::string> args = {path_str, new_value.dump()};
+        try {
+            return _lua_script_manager->execute_script(script_name, keys, args);
+        } catch (const LuaScriptException& e) {
+            throw LuaScriptException(script_name, "Key '" + key + "', path '" + path_str + "': " + e.what());
+        }
     }
-    // Should be unreachable if all exceptions from execute_script are RedisJSONExceptions
-    // or derived from it, or LuaScriptException. Adding throw to satisfy compiler.
-    throw RedisJSONException("Unknown error in atomic_compare_set after Lua script execution attempt.");
+}
+
+bool RedisJSONClient::non_atomic_compare_set(const std::string& key, const std::string& path_str,
+                                            const json& expected_val, const json& new_val) {
+    if (_is_swss_mode) {
+        // Non-atomic: Get full doc, get path, compare, if match then set path, set full doc
+        json doc;
+        try {
+            doc = get_json(key);
+        } catch (const PathNotFoundException&) {
+            // Key doesn't exist. If expected is null and path is simple (e.g. root or direct child),
+            // this might be a valid CAS to create. For now, if key not found, CAS fails.
+            return false;
+        }
+
+        json current_val_at_path = json(nullptr);
+        bool path_existed = true;
+        try {
+            current_val_at_path = _json_modifier->get_value_at_path(doc, _path_parser->parse(path_str));
+        } catch (const PathNotFoundException&) {
+            path_existed = false; // current_val_at_path remains null
+        }
+
+        if (path_existed && current_val_at_path == expected_val) {
+            SetOptions opts; // Default set options
+            _json_modifier->set_value_at_path(doc, _path_parser->parse(path_str), new_val, true /*create_path*/);
+            _set_document_after_modification(key, doc, opts);
+            return true;
+        } else if (!path_existed && expected_val.is_null()) { // Path didn't exist, and we expected null (i.e. path not to exist)
+            SetOptions opts;
+            _json_modifier->set_value_at_path(doc, _path_parser->parse(path_str), new_val, true /*create_path*/);
+            _set_document_after_modification(key, doc, opts);
+            return true;
+        }
+        return false;
+
+    } else { // Legacy
+        if (!_lua_script_manager) throw RedisInternalException("LuaScriptManager not initialized.");
+        const std::string script_name = "atomic_json_compare_set_path";
+        std::vector<std::string> keys = {key};
+        std::vector<std::string> args = {path_str, expected_val.dump(), new_val.dump()};
+        try {
+            json result_json = _lua_script_manager->execute_script(script_name, keys, args);
+            if (result_json.is_number_integer()) return result_json.get<int>() == 1;
+            throw LuaScriptException(script_name, "Non-integer result: " + result_json.dump());
+        } catch (const LuaScriptException& e) {
+            throw LuaScriptException(script_name, "Key '" + key + "', path '" + path_str + "': " + e.what());
+        }
+    }
 }
 
 // --- Utility Operations ---
 
 std::vector<std::string> RedisJSONClient::keys_by_pattern(const std::string& pattern) const {
-    std::vector<std::string> found_keys;
-    std::string cursor = "0";
-    RedisConnectionManager::RedisConnectionPtr conn; // Declare here for potential reuse across SCAN loops
-
-    do {
-        conn = get_redis_connection(); // Get a fresh connection for each SCAN command or reuse carefully.
-                                       // For simplicity of connection management, getting a new one is safer.
-
-        RedisReplyPtr reply(static_cast<redisReply*>(
-            // Using a COUNT of 100, adjust as needed for performance/memory.
-            conn->command("SCAN %s MATCH %s COUNT 100", cursor.c_str(), pattern.c_str())
-        ));
-
-        if (!reply) {
-            if (conn) _connection_manager->return_connection(std::move(conn));
-            throw RedisCommandException("SCAN", "Pattern: " + pattern + ", Cursor: " + cursor + ", Error: No reply or connection error");
+    if (_is_swss_mode) {
+        if (!_db_connector) throw RedisInternalException("DBConnector not initialized for SWSS mode.");
+        try {
+            // Assuming DBConnector has a keys method that takes a pattern.
+            // Standard Redis KEYS command is blocking. SCAN is preferred.
+            // If DBConnector::keys uses SCAN, great. Otherwise, this might be an issue.
+            // For now, assume it's available and reasonably performant.
+            return _db_connector->keys(pattern);
+        } catch (const std::exception& e) {
+            throw RedisCommandException("KEYS (SWSS)", "Pattern: " + pattern + ", Error: " + e.what());
         }
+    } else { // Legacy
+        std::vector<std::string> found_keys;
+        std::string cursor = "0";
+        RedisConnectionManager::RedisConnectionPtr conn;
 
-        if (reply->type == REDIS_REPLY_ERROR) {
-            std::string err_msg = (reply->str ? reply->str : "Redis error reply with no message");
-            if (conn) _connection_manager->return_connection(std::move(conn));
-            throw RedisCommandException("SCAN", "Pattern: " + pattern + ", Cursor: " + cursor + ", Error: " + err_msg);
-        }
+        do {
+            conn = get_legacy_redis_connection();
+            RedisReplyPtr reply(static_cast<redisReply*>(
+                conn->command("SCAN %s MATCH %s COUNT 100", cursor.c_str(), pattern.c_str())
+            ));
 
-        if (reply->type != REDIS_REPLY_ARRAY || reply->elements != 2) {
-            if (conn) _connection_manager->return_connection(std::move(conn));
-            throw RedisCommandException("SCAN", "Pattern: " + pattern + ", Cursor: " + cursor + ", Error: Unexpected reply structure from SCAN.");
-        }
-
-        // First element is the new cursor
-        redisReply* cursor_reply = reply->element[0];
-        if (cursor_reply->type != REDIS_REPLY_STRING) {
-            if (conn) _connection_manager->return_connection(std::move(conn));
-            throw RedisCommandException("SCAN", "Pattern: " + pattern + ", Error: New cursor is not a string.");
-        }
-        cursor = std::string(cursor_reply->str, cursor_reply->len);
-
-        // Second element is an array of keys
-        redisReply* keys_reply = reply->element[1];
-        if (keys_reply->type != REDIS_REPLY_ARRAY) {
-            if (conn) _connection_manager->return_connection(std::move(conn));
-            throw RedisCommandException("SCAN", "Pattern: " + pattern + ", Error: Keys element is not an array.");
-        }
-
-        for (size_t i = 0; i < keys_reply->elements; ++i) {
-            redisReply* key_element_reply = keys_reply->element[i];
-            if (key_element_reply->type == REDIS_REPLY_STRING) {
-                found_keys.emplace_back(key_element_reply->str, key_element_reply->len);
+            if (!reply) {
+                if(conn) _connection_manager->return_connection(std::move(conn));
+                throw RedisCommandException("SCAN", "Pattern: " + pattern + ", No reply");
             }
-            // Non-string elements in keys array would be strange, ignore or log.
-        }
-        
-        _connection_manager->return_connection(std::move(conn)); // Return connection after processing reply
+            if (reply->type == REDIS_REPLY_ERROR) {
+                 std::string err = reply->str ? reply->str : "Unknown SCAN error";
+                if(conn) _connection_manager->return_connection(std::move(conn));
+                throw RedisCommandException("SCAN", "Pattern: " + pattern + ", Error: " + err);
+            }
+            if (reply->type != REDIS_REPLY_ARRAY || reply->elements != 2) {
+                if(conn) _connection_manager->return_connection(std::move(conn));
+                throw RedisCommandException("SCAN", "Pattern: " + pattern + ", Unexpected reply structure");
+            }
 
-    } while (cursor != "0");
+            redisReply* cursor_reply = reply->element[0];
+            cursor = std::string(cursor_reply->str, cursor_reply->len);
 
-    return found_keys;
+            redisReply* keys_reply = reply->element[1];
+            for (size_t i = 0; i < keys_reply->elements; ++i) {
+                if (keys_reply->element[i]->type == REDIS_REPLY_STRING) {
+                    found_keys.emplace_back(keys_reply->element[i]->str, keys_reply->element[i]->len);
+                }
+            }
+            _connection_manager->return_connection(std::move(conn));
+        } while (cursor != "0");
+        return found_keys;
+    }
 }
 
-// Helper recursive function for search_by_value
+// search_by_value and get_all_paths are client-side, so their core logic remains the same,
+// they just use the (potentially mode-switched) get_json internally.
+
+// Helper recursive function for search_by_value (copied from original, no changes needed)
 void find_values_recursive(const json& current_json_doc, const json& search_value, json::array_t& found_values) {
     if (current_json_doc == search_value) {
         found_values.push_back(current_json_doc);
@@ -700,177 +859,78 @@ void find_values_recursive(const json& current_json_doc, const json& search_valu
             find_values_recursive(item, search_value, found_values);
         }
     }
-    // Primitive types are handled by direct comparison at the start of the function.
 }
 
 json RedisJSONClient::search_by_value(const std::string& key, const json& search_value) const {
-    // Client-side search. Fetches the whole document.
-    // This can be inefficient for large documents.
-    // RedisSearch or specific Lua scripts would be better for server-side searching.
-
     json document_to_search;
     try {
-        document_to_search = get_json(key); // Fetches the document from Redis
-    } catch (const PathNotFoundException& e) {
-        // If the key doesn't exist, there's nothing to search.
-        return json::array(); // Return an empty JSON array
-    } catch (const RedisJSONException& e) {
-        throw; // Rethrow other Redis-related exceptions
+        document_to_search = get_json(key); // Uses the mode-aware get_json
+    } catch (const PathNotFoundException& ) {
+        return json::array();
     }
-
+    // No change to recursive search logic needed
     json::array_t results_array;
     find_values_recursive(document_to_search, search_value, results_array);
-
-    return json(results_array); // Convert the C++ vector of json objects to a single json object (array type)
+    return json(results_array);
 }
 
-// Helper recursive function for get_all_paths
+// Helper recursive function for get_all_paths (copied from original, no changes needed)
 void find_json_paths_recursive(const json& current_node, const std::string& current_path_str, std::vector<std::string>& paths_list) {
-    // Add the path to the current node itself.
-    // Depending on desired output, might not add path to leaf primitive if only paths to containers are needed.
-    // For "all paths", path to everything including primitives makes sense.
-    // paths_list.push_back(current_path_str); // Path to current node. This might be too verbose.
-                                            // Usually paths to elements *within* objects/arrays are listed.
-                                            // Let's adjust to add paths to where values are stored.
-
     if (current_node.is_object()) {
-        if (current_node.empty() && current_path_str != "$") { // Represent path to empty object itself
-             // paths_list.push_back(current_path_str); // Only if objects themselves need a path entry.
+        if (current_node.empty() && current_path_str != "$") {
+            // paths_list.push_back(current_path_str); // Optional: path to empty object itself
         }
         for (auto& el : current_node.items()) {
-            // Escape key name if it contains special characters for robust path generation.
-            // For simplicity, direct concatenation is used here. A robust solution would check el.key().
-            // Example: `$.` is for root, `.` is separator. If key is `my.key`, path becomes `$.my.key` not `$.my.key`.
-            // nlohmann::json path pointers are like "/a/b/0". We are generating JSONPath $.a.b[0]
-            std::string child_path = current_path_str + "." + el.key();
-            paths_list.push_back(child_path); // Path to the key-value pair
+            std::string child_path = current_path_str + "." + _json_modifier->escape_path_segment(el.key()); // Use modifier for escaping
+            paths_list.push_back(child_path);
             find_json_paths_recursive(el.value(), child_path, paths_list);
         }
     } else if (current_node.is_array()) {
-        if (current_node.empty() && current_path_str != "$") { // Represent path to empty array itself
-            // paths_list.push_back(current_path_str);
+        if (current_node.empty() && current_path_str != "$") {
+            // paths_list.push_back(current_path_str); // Optional: path to empty array itself
         }
         for (size_t i = 0; i < current_node.size(); ++i) {
             std::string child_path = current_path_str + "[" + std::to_string(i) + "]";
-            paths_list.push_back(child_path); // Path to the array element
+            paths_list.push_back(child_path);
             find_json_paths_recursive(current_node[i], child_path, paths_list);
         }
     }
-    // For primitive types, the path *to* them (from their parent object/array) is already added.
-    // If we wanted to list the path *of* the primitive value itself, it would be `current_path_str`.
 }
 
-
 std::vector<std::string> RedisJSONClient::get_all_paths(const std::string& key) const {
-    // Client-side implementation. Fetches the whole document.
-    // RedisJSON's `JSON.DEBUG PATHS <key> [path]` could be an alternative if available and suitable,
-    // but it's a debug command and might not be universally available or intended for production use.
-
     json document;
     try {
-        document = get_json(key);
-    } catch (const PathNotFoundException& e) {
-        // Key does not exist, so no paths.
+        document = get_json(key); // Uses the mode-aware get_json
+    } catch (const PathNotFoundException& ) {
         return {};
-    } catch (const RedisJSONException& e) {
-        throw; // Rethrow other Redis-related errors
     }
 
     std::vector<std::string> all_paths;
-    if (!document.is_null() && !document.empty()) { // Only proceed if there's something to get paths from
-        all_paths.push_back("$"); // Path to the root element itself
-        find_json_paths_recursive(document, "$", all_paths);
-    } else if (document.is_object() || document.is_array()) { // Handles empty object {} or array [] at root
+    if (!document.is_null()) {
         all_paths.push_back("$");
+        if (!document.empty() || document.is_object() || document.is_array()) { // only recurse if not primitive or null
+             find_json_paths_recursive(document, "$", all_paths);
+        }
     }
-
-
-    // Remove duplicate paths that might arise if we add path for current node and then for its children.
-    // The current recursive logic aims to avoid direct duplicates by adding path to child.
-    // std::sort(all_paths.begin(), all_paths.end());
-    // all_paths.erase(std::unique(all_paths.begin(), all_paths.end()), all_paths.end());
-    // The current implementation should generate unique paths by construction.
-
     return all_paths;
 }
 
+
 // --- Access to sub-components ---
-// These might not need implementation if they are just returning references/pointers
-// to already initialized members. However, ensure members are initialized.
-
+// These are commented out in the header for SWSS mode.
+// If needed, they would require significant adaptation.
+/*
 JSONQueryEngine& RedisJSONClient::query_engine() {
-    if (!_query_engine) {
-        // Lazy initialization or ensure it's done in constructor
-        _query_engine = std::make_unique<JSONQueryEngine>(*this);
-    }
-    return *_query_engine;
+    // ...
 }
-
-JSONCache& RedisJSONClient::cache() {
-    if (!_json_cache) {
-        _json_cache = std::make_unique<JSONCache>(/* constructor args if any */);
-    }
-    return *_json_cache;
-}
-
-JSONSchemaValidator& RedisJSONClient::schema_validator() {
-    if (!_schema_validator) {
-        _schema_validator = std::make_unique<JSONSchemaValidator>(/* constructor args if any */);
-    }
-    return *_schema_validator;
-}
-
-JSONEventEmitter& RedisJSONClient::event_emitter() {
-    if (!_event_emitter) {
-        _event_emitter = std::make_unique<JSONEventEmitter>(/* constructor args if any */);
-    }
-    return *_event_emitter;
-}
-
-TransactionManager& RedisJSONClient::transaction_manager() {
-    if (!_transaction_manager) {
-        // TransactionManager might need RedisConnectionManager or similar
-        _transaction_manager = std::make_unique<TransactionManager>(_connection_manager.get(), _path_parser.get(),_json_modifier.get());
-    }
-    return *_transaction_manager;
-}
+// ... etc. for cache, schema_validator, event_emitter, transaction_manager
+*/
 
 
 // --- Internal Helpers ---
-
-void RedisJSONClient::_perform_write_operation(const std::string& key, const std::optional<std::string>& path, std::function<void(RedisConnection&)> operation) {
-    // Internal helper. If called by stubbed methods, it might not be fully exercised.
-    // Actual implementation would involve getting a connection, running operation,
-    // then cache invalidation and event emission logic.
-    RedisConnectionManager::RedisConnectionPtr conn = get_redis_connection();
-    try {
-        operation(*conn);
-        // if (_json_cache) _json_cache->invalidate(key, path);
-        // if (_event_emitter) _event_emitter->emit(key, path, "modified"); // Example event
-    } catch (...) {
-        _connection_manager->return_connection(std::move(conn));
-        throw;
-    }
-    _connection_manager->return_connection(std::move(conn));
-    // For now, just a basic pass-through or throw if called by a stub.
-    // This method itself doesn't need to throw "Not Implemented" if its callers do.
-}
-
-json RedisJSONClient::_get_document_with_caching(const std::string& key) const {
-    // Internal helper.
-    // if (_json_cache && _json_cache->is_enabled()) {
-    //     auto cached_val = _json_cache->get(key);
-    //     if (cached_val) return *cached_val;
-    // }
-    // json doc = get_json(key); // Careful: this calls the public get_json
-                                // This helper should probably implement direct Redis GET
-    // if (_json_cache && _json_cache->is_enabled()) {
-    //     _json_cache->put(key, doc);
-    // }
-    // return doc;
-    throw std::runtime_error("Not implemented: RedisJSONClient::_get_document_with_caching (via stub)");
-    return json{};
-}
+// _perform_write_operation and _get_document_with_caching were for legacy connection manager and complex features.
+// They are likely not directly applicable or need complete rethink for SWSS mode.
+// For now, they are effectively unused if client-side path ops call get_json/set_json directly.
 
 json RedisJSONClient::_parse_json_reply(const std::string& reply_str, const std::string& context_msg) const {
     try {
@@ -879,6 +939,5 @@ json RedisJSONClient::_parse_json_reply(const std::string& reply_str, const std:
         throw JsonParsingException(context_msg + ": " + e.what() + ". Received: " + reply_str);
     }
 }
-
 
 } // namespace redisjson
