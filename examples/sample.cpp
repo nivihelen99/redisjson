@@ -35,7 +35,7 @@ void run_document_operations(redisjson::RedisJSONClient& client) {
         client.set_json(doc_key, user_profile);
         std::cout << "SUCCESS: SET document for key '" << doc_key << "'." << std::endl;
         // std::cout << user_profile.dump(2) << std::endl; // Verify content if needed
-    } catch (const redisjson::RedisException& e) {
+    } catch (const redisjson::RedisJSONException& e) {
         std::cerr << "ERROR: SET document: " << e.what() << std::endl;
     }
 
@@ -47,7 +47,7 @@ void run_document_operations(redisjson::RedisJSONClient& client) {
         if (retrieved_doc != user_profile) {
              std::cerr << "VERIFICATION ERROR: Retrieved document differs from original!" << std::endl;
         }
-    } catch (const redisjson::RedisException& e) {
+    } catch (const redisjson::RedisJSONException& e) {
         std::cerr << "ERROR: GET document: " << e.what() << std::endl;
     }
 
@@ -64,7 +64,7 @@ void run_document_operations(redisjson::RedisJSONClient& client) {
         std::cout << "\nSUCCESS: DEL document for key '" << doc_key << "'." << std::endl;
         exists = client.exists_json(doc_key);
         std::cout << "SUCCESS: Key '" << doc_key << "' exists after delete: " << (exists ? "true" : "false") << std::endl;
-    } catch (const redisjson::RedisException& e) {
+    } catch (const redisjson::RedisJSONException& e) {
         std::cerr << "ERROR: DEL document: " << e.what() << std::endl;
     }
 }
@@ -93,7 +93,7 @@ void run_path_operations(redisjson::RedisJSONClient& client) {
         std::cout << "SUCCESS: GET path 'contact.email': " << email.dump() << std::endl;
         json first_notification = client.get_path(user_key, "preferences.notifications[0]");
         std::cout << "SUCCESS: GET path 'preferences.notifications[0]': " << first_notification.dump() << std::endl;
-    } catch (const redisjson::RedisException& e) {
+    } catch (const redisjson::RedisJSONException& e) {
         std::cerr << "ERROR: GET path: " << e.what() << std::endl;
     }
 
@@ -109,7 +109,7 @@ void run_path_operations(redisjson::RedisJSONClient& client) {
         json current_doc = client.get_json(user_key);
         std::cout << "Current document after SET path operations:\n" << current_doc.dump(2) << std::endl;
 
-    } catch (const redisjson::RedisException& e) {
+    } catch (const redisjson::RedisJSONException& e) {
         std::cerr << "ERROR: SET path: " << e.what() << std::endl;
     }
 
@@ -129,7 +129,7 @@ void run_path_operations(redisjson::RedisJSONClient& client) {
         std::cout << "\nSUCCESS: DEL path 'preferences.theme'." << std::endl;
         json current_doc = client.get_json(user_key);
         std::cout << "Current document after DEL path operation:\n" << current_doc.dump(2) << std::endl;
-    } catch (const redisjson::RedisException& e) {
+    } catch (const redisjson::RedisJSONException& e) {
         std::cerr << "ERROR: DEL path: " << e.what() << std::endl;
     }
 
@@ -153,7 +153,7 @@ void run_array_operations(redisjson::RedisJSONClient& client) {
         std::cout << "SUCCESS: APPEND 'cherries' to 'items'." << std::endl;
         json current_doc = client.get_json(list_key);
         std::cout << "Document after append:\n" << current_doc.dump(2) << std::endl;
-    } catch (const redisjson::RedisException& e) {
+    } catch (const redisjson::RedisJSONException& e) {
         std::cerr << "ERROR: APPEND to array: " << e.what() << std::endl;
     }
 
@@ -163,7 +163,7 @@ void run_array_operations(redisjson::RedisJSONClient& client) {
         std::cout << "\nSUCCESS: PREPEND 'elderberries' to 'items'." << std::endl;
         json current_doc = client.get_json(list_key);
         std::cout << "Document after prepend:\n" << current_doc.dump(2) << std::endl;
-    } catch (const redisjson::RedisException& e) {
+    } catch (const redisjson::RedisJSONException& e) {
         std::cerr << "ERROR: PREPEND to array: " << e.what() << std::endl;
     }
 
@@ -171,7 +171,7 @@ void run_array_operations(redisjson::RedisJSONClient& client) {
     try {
         size_t len = client.array_length(list_key, "items");
         std::cout << "\nSUCCESS: Array length of 'items': " << len << std::endl; // Should be 4
-    } catch (const redisjson::RedisException& e) {
+    } catch (const redisjson::RedisJSONException& e) {
         std::cerr << "ERROR: Array length: " << e.what() << std::endl;
     }
 
@@ -181,7 +181,7 @@ void run_array_operations(redisjson::RedisJSONClient& client) {
         std::cout << "\nSUCCESS: POP from 'items' (last element): " << popped_val.dump() << std::endl;
         json current_doc = client.get_json(list_key);
         std::cout << "Document after pop (last):\n" << current_doc.dump(2) << std::endl;
-    } catch (const redisjson::RedisException& e) {
+    } catch (const redisjson::RedisJSONException& e) {
         std::cerr << "ERROR: POP from array (last): " << e.what() << std::endl;
     }
 
@@ -191,7 +191,7 @@ void run_array_operations(redisjson::RedisJSONClient& client) {
         std::cout << "\nSUCCESS: POP from 'items' (index 0): " << popped_val.dump() << std::endl;
         json current_doc = client.get_json(list_key);
         std::cout << "Document after pop (index 0):\n" << current_doc.dump(2) << std::endl;
-    } catch (const redisjson::RedisException& e) {
+    } catch (const redisjson::RedisJSONException& e) {
         std::cerr << "ERROR: POP from array (index 0): " << e.what() << std::endl;
     }
 
@@ -215,7 +215,7 @@ void run_atomic_operations(redisjson::RedisJSONClient& client) {
         json old_value = client.atomic_get_set(atomic_key, "value", 10);
         std::cout << "SUCCESS: ATOMIC_GET_SET on 'value'. Old value: " << old_value.dump()
                   << ", New value: " << client.get_path(atomic_key, "value").dump() << std::endl;
-    } catch (const redisjson::RedisException& e) {
+    } catch (const redisjson::RedisJSONException& e) {
         std::cerr << "ERROR: ATOMIC_GET_SET: " << e.what()
                   << " (This might indicate Lua script not found/failed or non-atomic fallback issues)" << std::endl;
     }
@@ -232,7 +232,7 @@ void run_atomic_operations(redisjson::RedisJSONClient& client) {
                   << (success ? "true" : "false") << std::endl;
         std::cout << "Current 'version': " << client.get_path(atomic_key, "version").dump() << std::endl;
 
-    } catch (const redisjson::RedisException& e) {
+    } catch (const redisjson::RedisJSONException& e) {
         std::cerr << "ERROR: ATOMIC_COMPARE_SET: " << e.what()
                   << " (This might indicate Lua script not found/failed or non-atomic fallback issues)" << std::endl;
     }
@@ -290,7 +290,7 @@ int main() {
              std::cerr << "Attempted to use a password." << std::endl;
         }
         return 1;
-    } catch (const redisjson::RedisException& e) {
+    } catch (const redisjson::RedisJSONException& e) {
         std::cerr << "CRITICAL: A RedisJSON++ error occurred: " << e.what() << std::endl;
         return 1;
     } catch (const std::exception& e) {
