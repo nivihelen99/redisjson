@@ -445,9 +445,11 @@ void RedisConnectionManager::on_connection_restored(std::function<void(const std
 }
 
 void RedisConnectionManager::health_check_loop() {
+    std::vector<RedisConnectionManager::RedisConnectionPtr> connections_to_remove_outside_lock;
+
     while (run_health_checker_ && !shutting_down_) {
         bool previously_healthy = primary_healthy_.load();
-        bool currently_healthy = check_primary_health(); 
+        bool currently_healthy = check_primary_health();
 
         if (currently_healthy && !previously_healthy && connection_restored_callback_) {
             connection_restored_callback_(config_.host + ":" + std::to_string(config_.port));
@@ -456,7 +458,7 @@ void RedisConnectionManager::health_check_loop() {
         }
         primary_healthy_ = currently_healthy;
 
-        { 
+        { // Start of critical section with pool_mutex_
             std::unique_lock<std::mutex> lock(pool_mutex_);
             if (shutting_down_ || !run_health_checker_) break;
 
@@ -465,39 +467,56 @@ void RedisConnectionManager::health_check_loop() {
                 
                 bool is_bad = false;
                 if (it->get()) { // Check if pointer inside unique_ptr is valid
-                    if (!(*it)->ping()) {
+                    if (!(*it)->ping()) { // ping() might fail if connection is truly bad
                         is_bad = true;
                     }
                 } else { 
-                    is_bad = true; // unique_ptr itself is null (should not happen if managed correctly)
+                    // This case (nullptr in pool_) should ideally not happen if pool is managed correctly.
+                    is_bad = true;
                 }
 
                 if (is_bad) {
                     stats_.connection_errors++;
-                    RedisConnection* conn_ptr_to_remove = it->get();
+                    RedisConnection* conn_raw_ptr = it->get();
                     
-                    std::queue<RedisConnection*> new_available_connections;
+                    // Remove from available_connections_ queue if present
+                    std::queue<RedisConnection*> new_available_connections_q;
                     while(!available_connections_.empty()){
                         RedisConnection* q_conn = available_connections_.front();
                         available_connections_.pop();
-                        if(q_conn != conn_ptr_to_remove){
-                            new_available_connections.push(q_conn);
+                        if(q_conn != conn_raw_ptr){
+                            new_available_connections_q.push(q_conn);
                         } else {
+                            // If found in available_connections_, it was idle.
                             stats_.idle_connections--; 
                         }
                     }
-                    available_connections_ = new_available_connections;
+                    available_connections_ = new_available_connections_q;
                     
-                    // it->reset(); // Reset the unique_ptr, deleter will be called.
-                    it = pool_.erase(it); 
-                    stats_.total_connections--; 
+                    // Move the RedisConnectionPtr to the temporary vector for destruction outside the lock.
+                    connections_to_remove_outside_lock.push_back(std::move(*it));
+                    it = pool_.erase(it); // Erase the (now empty) unique_ptr from pool_ vector.
+                                          // This does not call the deleter of the connection itself yet.
+                    // total_connections will be decremented by return_connection when the object is finally destroyed.
                 } else {
                     ++it; 
                 }
             }
-            maintain_pool_size(lock); 
+            maintain_pool_size(lock); // This might add new connections to the pool.
+                                      // Lock is passed and potentially unlocked/relocked inside.
+        } // End of critical section, pool_mutex_ is released by 'lock' going out of scope.
+
+        // Destroy connections that were marked for removal.
+        // Their deleters will call RedisConnectionManager::return_connection.
+        // return_connection will acquire pool_mutex_ without deadlocking,
+        // and will ultimately delete the RedisConnection object because it's
+        // not being returned to the pool (it's already been removed).
+        if (!connections_to_remove_outside_lock.empty()) {
+            connections_to_remove_outside_lock.clear();
         }
 
+        // Wait for the next health check interval or shutdown signal.
+        // This re-acquires the mutex for the condition variable.
         std::unique_lock<std::mutex> cv_lock(pool_mutex_); 
         if (shutting_down_ || !run_health_checker_) break;
         condition_.wait_for(cv_lock, health_check_interval_, [this]{ return shutting_down_.load() || !run_health_checker_.load(); });
