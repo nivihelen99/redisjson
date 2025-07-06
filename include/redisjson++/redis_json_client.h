@@ -89,7 +89,7 @@ public:
     TransactionManager& transaction_manager(); // Added for transaction access
 
     // Helper to get a connection (can be private or protected if only used internally)
-    std::unique_ptr<RedisConnection> get_redis_connection() const;
+    RedisConnectionManager::RedisConnectionPtr get_redis_connection() const;
 
 private:
     ClientConfig _config;
