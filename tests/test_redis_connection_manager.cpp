@@ -63,7 +63,7 @@ TEST_F(RedisConnectionManagerTest, GetAndReturnConnection) {
         GTEST_SKIP() << "Redis server not available. Skipping test.";
     }
     redisjson::RedisConnectionManager manager(config);
-    std::unique_ptr<redisjson::RedisConnection> conn;
+    redisjson::RedisConnectionManager::RedisConnectionPtr conn;
 
     ASSERT_NO_THROW({
         conn = manager.get_connection();
@@ -92,7 +92,7 @@ TEST_F(RedisConnectionManagerTest, PoolSizeLimitAndStats) {
     config.connection_pool_size = 2;
     redisjson::RedisConnectionManager manager(config); // Health check interval is default
 
-    std::vector<std::unique_ptr<redisjson::RedisConnection>> connections;
+    std::vector<redisjson::RedisConnectionManager::RedisConnectionPtr> connections;
     // Acquire all connections
     for (int i = 0; i < config.connection_pool_size; ++i) {
         ASSERT_NO_THROW({
@@ -149,7 +149,7 @@ TEST_F(RedisConnectionManagerTest, GetConnectionRetriesAfterBadPooledConnection)
     redisjson::RedisConnectionManager manager(config);
 
     // 1. Get the connection
-    std::unique_ptr<redisjson::RedisConnection> conn1;
+    redisjson::RedisConnectionManager::RedisConnectionPtr conn1;
     ASSERT_NO_THROW(conn1 = manager.get_connection());
     ASSERT_NE(conn1, nullptr);
     EXPECT_TRUE(conn1->is_connected());
@@ -180,7 +180,7 @@ TEST_F(RedisConnectionManagerTest, GetConnectionRetriesAfterBadPooledConnection)
 
     // This test is more conceptual with current tools.
     // A true test would involve a mock Redis or more control over connection state.
-    std::unique_ptr<redisjson::RedisConnection> conn2;
+    redisjson::RedisConnectionManager::RedisConnectionPtr conn2;
     ASSERT_NO_THROW(conn2 = manager.get_connection()); // Should provide a healthy connection
     ASSERT_NE(conn2, nullptr);
     EXPECT_TRUE(conn2->is_connected());
