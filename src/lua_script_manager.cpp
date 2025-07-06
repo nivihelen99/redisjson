@@ -1,116 +1,465 @@
 #include "redisjson++/lua_script_manager.h"
 #include "redisjson++/redis_connection_manager.h" // For RedisConnection
+#include "redisjson++/exceptions.h" // For JsonParsingException, LuaScriptException
 #include <vector>
+#include <string>
+#include <algorithm> // For std::all_of
+#include <cstring> // For strncmp
 
 namespace redisjson {
 
 // --- Built-in Lua Scripts Definitions ---
-// These are simplified placeholders. Real scripts would be more complex.
-// Example: A script that gets a JSON string, parses it (if cjson is available on server),
-// modifies a path, and sets it back. For non-RedisJSON modules, server-side parsing is key.
-// If cjson is not available on the Redis server, Lua scripts would have to operate on the string
-// representation or fetch, modify client-side, and set (which is not atomic for complex ops).
-// The requirement implies Lua scripts *are* doing JSON manipulation, so cjson.decode/encode is assumed.
 
-// This script is a conceptual example. Actual RedisJSON module scripts are more complex.
-// For a library *not* using RedisJSON module, Lua scripts for JSON ops are non-trivial.
-// They'd need a Lua JSON library (like cjson) available in Redis's Lua environment.
-const std::string LuaScriptManager::JSON_GET_SET_LUA = R"lua(
-    local key = KEYS[1]
-    local path_str = ARGV[1] -- Simplified: path as a string, not parsed deeply here
-    local new_value_json_str = ARGV[2]
-
-    local current_json_str = redis.call('GET', key)
-    if not current_json_str then
-        return nil -- Or some error indication
+// Helper function to parse a JSON path string (e.g., "obj.arr[0].field")
+// Returns a table of path segments. Numeric indices are converted to numbers (1-based for Lua).
+const std::string LUA_HELPER_PARSE_PATH_FUNC = R"lua(
+local function parse_path(path_str)
+    local segments = {}
+    if path_str == nil or path_str == '$' or path_str == '' then
+        return segments -- Root path
     end
+    path_str = path_str:gsub('^%$%.', ''):gsub('^%$%[', '[')
 
-    -- Assume cjson is available in Redis Lua environment
-    local current_doc = cjson.decode(current_json_str)
-    local new_value = cjson.decode(new_value_json_str)
+    local current_pos = 1
+    while current_pos <= #path_str do
+        local key_match = path_str:match('^([^%.%[]+)', current_pos)
+        if key_match then
+            -- If key_match itself contains escaped dots or brackets, this simple parser won't handle it.
+            -- Assuming simple keys for now, or keys are pre-escaped/quoted if needed by a more complex path spec.
+            table.insert(segments, key_match)
+            current_pos = current_pos + #key_match
+        else
+            -- This case implies we are at a bracket or end of string after a dot.
+            -- If not at a bracket, and not end of string, it might be an error or complex path.
+        end
 
-    -- Simplified path handling: assumes path_str is a single top-level key
-    -- A real script would need a robust path parser in Lua or receive parsed path elements.
-    local old_value_at_path = current_doc[path_str]
-    current_doc[path_str] = new_value
-
-    redis.call('SET', key, cjson.encode(current_doc))
-
-    if old_value_at_path == nil then -- cjson might convert Lua nil to json null if that's how it works
-        return redis.call('cjson.encode', nil) -- Explicitly return JSON null string
+        if current_pos <= #path_str then
+            local char = path_str:sub(current_pos, current_pos)
+            if char == '.' then
+                if current_pos == #path_str then -- Trailing dot
+                    --redis.log(redis.LOG_WARNING, "Path ends with a dot: " .. path_str)
+                    break -- Path ends with a dot, ignore.
+                end
+                current_pos = current_pos + 1 -- Skip dot
+            elseif char == '[' then
+                local end_bracket_pos = path_str:find(']', current_pos)
+                if not end_bracket_pos then
+                    return redis.error_reply("ERR_PATH Malformed path: Unmatched '[' in path: " .. path_str)
+                end
+                local index_str = path_str:sub(current_pos + 1, end_bracket_pos - 1)
+                local index_num = tonumber(index_str)
+                if index_num == nil then
+                     return redis.error_reply("ERR_PATH Malformed path: Non-numeric index '" .. index_str .. "' in path: " .. path_str)
+                end
+                table.insert(segments, index_num + 1) -- Lua arrays are 1-indexed
+                current_pos = end_bracket_pos + 1
+            else
+                -- Unexpected character in path
+                return redis.error_reply("ERR_PATH Malformed path: Unexpected character '" .. char .. "' at pos " .. current_pos .. " in path: " .. path_str)
+            end
+        end
     end
-    return cjson.encode(old_value_at_path)
+    return segments
+end
 )lua";
 
-// Placeholder - real script would be more involved
-const std::string LuaScriptManager::JSON_COMPARE_SET_LUA = R"lua(
+const std::string LUA_HELPER_GET_VALUE_AT_PATH_FUNC = R"lua(
+local function get_value_at_path(doc, path_segments)
+    local current = doc
+    for i, segment in ipairs(path_segments) do
+        if type(current) ~= 'table' then
+            return nil -- Path leads into a non-table value
+        end
+        current = current[segment]
+        if current == nil then
+            return nil -- Path segment not found
+        end
+    end
+    return current
+end
+)lua";
+
+const std::string LUA_HELPER_SET_VALUE_AT_PATH_FUNC = R"lua(
+local function set_value_at_path(doc, path_segments, value_to_set, create_path_flag)
+    local current = doc
+    for i = 1, #path_segments - 1 do
+        local segment = path_segments[i]
+        if type(current) ~= 'table' then
+            return false, 'Path segment ' .. tostring(segment) .. ' is not a table/array'
+        end
+        if current[segment] == nil or type(current[segment]) ~= 'table' then
+            if create_path_flag then
+                local next_segment = path_segments[i+1]
+                if type(next_segment) == 'number' then
+                    current[segment] = {} 
+                else
+                    current[segment] = {} 
+                end
+            else
+                return false, 'Path segment ' .. tostring(segment) .. ' not found and create_path is false'
+            end
+        end
+        current = current[segment]
+    end
+
+    local final_segment = path_segments[#path_segments]
+    if type(current) ~= 'table' then
+         return false, 'Final path leads to a non-table parent for segment ' .. tostring(final_segment)
+    end
+    current[final_segment] = value_to_set
+    return true, 'OK'
+end
+)lua";
+
+const std::string LUA_HELPER_DEL_VALUE_AT_PATH_FUNC = R"lua(
+local function del_value_at_path(doc, path_segments)
+    local current = doc
+    if #path_segments == 0 then 
+        return false, 'Cannot delete root object/document using path DEL; use DEL key command'
+    end
+
+    for i = 1, #path_segments - 1 do
+        local segment = path_segments[i]
+        if type(current) ~= 'table' then
+            return false, 'Path segment ' .. tostring(segment) .. ' is not a table/array'
+        end
+        current = current[segment]
+        if current == nil then
+            return true, 'Intermediate path segment ' .. tostring(segment) .. ' not found, nothing to delete' 
+        end
+    end
+
+    local final_segment = path_segments[#path_segments]
+    if type(current) == 'table' then
+        if current[final_segment] ~= nil then
+            current[final_segment] = nil
+            return true, 'OK'
+        else
+            return true, 'Final path segment ' .. tostring(final_segment) .. ' not found, nothing to delete'
+        end
+    else
+        return false, 'Final path leads to a non-table parent for segment ' .. tostring(final_segment)
+    end
+end
+)lua";
+
+const std::string LUA_COMMON_HELPERS = LUA_HELPER_PARSE_PATH_FUNC + LUA_HELPER_GET_VALUE_AT_PATH_FUNC + LUA_HELPER_SET_VALUE_AT_PATH_FUNC + LUA_HELPER_DEL_VALUE_AT_PATH_FUNC;
+
+const std::string LuaScriptManager::JSON_PATH_GET_LUA = LUA_COMMON_HELPERS + R"lua(
+    local key = KEYS[1]
+    local path_str = ARGV[1]
+    local current_json_str = redis.call('GET', key)
+    if not current_json_str then return nil end
+    local current_doc, err = cjson.decode(current_json_str)
+    if not current_doc then return redis.error_reply('ERR_DECODE Key ' .. key .. ': ' .. (err or 'unknown error')) end
+    if path_str == '$' or path_str == '' then return cjson.encode(current_doc) end
+    local path_segments = parse_path(path_str)
+    if path_segments == nil then return redis.error_reply('ERR_PATH Invalid path string: ' .. path_str) end
+    local value_at_path = get_value_at_path(current_doc, path_segments)
+    return cjson.encode(value_at_path) -- cjson.encode(nil) is "null"
+)lua";
+
+const std::string LuaScriptManager::JSON_PATH_SET_LUA = LUA_COMMON_HELPERS + R"lua(
+    local key = KEYS[1]
+    local path_str = ARGV[1]
+    local new_value_json_str = ARGV[2]
+    local condition = ARGV[3]
+    local ttl_str = ARGV[4]
+    local create_path_str = ARGV[5]
+    local create_path_flag = (create_path_str == "true")
+
+    local current_json_str = redis.call('GET', key)
+    local current_doc
+    local path_exists = false
+
+    if current_json_str then
+        local err
+        current_doc, err = cjson.decode(current_json_str)
+        if not current_doc then return redis.error_reply('ERR_DECODE Existing JSON: ' .. (err or 'unknown error')) end
+        if path_str == '$' or path_str == '' then path_exists = true else
+            local temp_path_segments = parse_path(path_str)
+            if temp_path_segments == nil then return redis.error_reply('ERR_PATH Invalid path string for check: ' .. path_str) end
+            if get_value_at_path(current_doc, temp_path_segments) ~= nil then path_exists = true end
+        end
+    else
+        if condition == 'XX' then return false end
+        current_doc = {}
+        if path_str == '$' or path_str == '' then path_exists = true end 
+    end
+
+    if condition == 'NX' and path_exists then return false end
+    if condition == 'XX' and not path_exists then return false end
+
+    local new_value, err_val = cjson.decode(new_value_json_str)
+    if not new_value and new_value_json_str ~= 'null' then return redis.error_reply('ERR_DECODE_ARG New value: '.. (err_val or 'unknown error')) end
+
+    if path_str == '$' or path_str == '' then 
+        if type(new_value) ~= 'table' and new_value_json_str ~= 'null' then return redis.error_reply('ERR_ROOT_TYPE Root must be object/array/null') end
+        current_doc = new_value 
+    else
+        local path_segments = parse_path(path_str)
+        if path_segments == nil then return redis.error_reply('ERR_PATH Invalid path string for set: ' .. path_str) end
+        local success, err_set = set_value_at_path(current_doc, path_segments, new_value, create_path_flag)
+        if not success then return redis.error_reply('ERR_SET_PATH ' .. err_set) end
+    end
+
+    local new_doc_json_str, err_enc = cjson.encode(current_doc)
+    if not new_doc_json_str then return redis.error_reply('ERR_ENCODE Document: ' .. (err_enc or 'unknown')) end
+    redis.call('SET', key, new_doc_json_str)
+
+    local ttl = tonumber(ttl_str)
+    if ttl and ttl > 0 then redis.call('EXPIRE', key, ttl) end
+    return true
+)lua";
+
+const std::string LuaScriptManager::JSON_PATH_DEL_LUA = LUA_COMMON_HELPERS + R"lua(
+    local key = KEYS[1]
+    local path_str = ARGV[1]
+    local current_json_str = redis.call('GET', key)
+    if not current_json_str then return 0 end
+    local current_doc, err = cjson.decode(current_json_str)
+    if not current_doc then return redis.error_reply('ERR_DECODE JSON: ' .. (err or 'unknown error')) end
+
+    if path_str == '$' or path_str == '' then return redis.call('DEL', key) end
+
+    local path_segments = parse_path(path_str)
+    if path_segments == nil then return redis.error_reply('ERR_PATH Invalid path string: ' .. path_str) end
+    local success, msg = del_value_at_path(current_doc, path_segments)
+    if not success then return redis.error_reply('ERR_DEL_PATH ' .. msg) end
+    if msg ~= 'OK' then return 0 end
+
+    local new_doc_json_str, err_enc = cjson.encode(current_doc)
+    if not new_doc_json_str then return redis.error_reply('ERR_ENCODE Deleted doc: ' .. (err_enc or 'unknown')) end
+    redis.call('SET', key, new_doc_json_str)
+    return 1
+)lua";
+
+const std::string LuaScriptManager::JSON_PATH_TYPE_LUA = LUA_COMMON_HELPERS + R"lua(
+    local key = KEYS[1]
+    local path_str = ARGV[1]
+    local current_json_str = redis.call('GET', key)
+    if not current_json_str then return nil end
+    local current_doc, err = cjson.decode(current_json_str)
+    if not current_doc then return redis.error_reply('ERR_DECODE JSON: ' .. (err or 'unknown error')) end
+    
+    local value_at_path
+    if path_str == '$' or path_str == '' then value_at_path = current_doc else
+        local path_segments = parse_path(path_str)
+        if path_segments == nil then return redis.error_reply('ERR_PATH Invalid path string: ' .. path_str) end
+        value_at_path = get_value_at_path(current_doc, path_segments)
+    end
+
+    if value_at_path == nil then return nil end -- Path not found or explicit JSON null handled by cjson.encode(nil)
+    if value_at_path == cjson.null then return "null" end
+
+    local lua_type = type(value_at_path)
+    if lua_type == 'table' then
+        local is_array = true; local n = 0
+        for k,v in pairs(value_at_path) do n = n + 1; if type(k) ~= 'number' or k < 1 or k > n then is_array = false; break; end end
+        if n == 0 and next(value_at_path) == nil then return "array" end -- Empty table is empty array by convention here
+        if is_array and #value_at_path == n then return "array" else return "object" end
+    elseif lua_type == 'string' then return "string"
+    elseif lua_type == 'number' then if math.floor(value_at_path) == value_at_path then return "integer" else return "number" end
+    elseif lua_type == 'boolean' then return "boolean" end
+    return nil 
+)lua";
+
+const std::string LuaScriptManager::JSON_ARRAY_APPEND_LUA = LUA_COMMON_HELPERS + R"lua(
+    local key = KEYS[1]
+    local path_str = ARGV[1]
+    local value_json_str = ARGV[2]
+    local current_json_str = redis.call('GET', key)
+    if not current_json_str then return redis.error_reply('ERR_NOKEY Key not found') end
+    local doc, err = cjson.decode(current_json_str)
+    if not doc then return redis.error_reply('ERR_DECODE Invalid JSON: ' .. (err or 'unknown')) end
+    local value_to_append, err_val = cjson.decode(value_json_str)
+    if not value_to_append and value_json_str ~= 'null' then return redis.error_reply('ERR_DECODE_ARG Value: ' .. (err_val or 'unknown')) end
+
+    local target_array_ref = doc 
+    if path_str ~= '$' and path_str ~= '' then
+        local path_segments = parse_path(path_str)
+        if path_segments == nil then return redis.error_reply('ERR_PATH Invalid path string: ' .. path_str) end
+        target_array_ref = get_value_at_path(doc, path_segments)
+    end
+
+    if target_array_ref == nil then return redis.error_reply('ERR_NOPATH Path not found') end
+    if type(target_array_ref) ~= 'table' then return "ERR_NOT_ARRAY" end 
+    table.insert(target_array_ref, value_to_append)
+        
+    local new_doc_json_str, err_enc = cjson.encode(doc)
+    if not new_doc_json_str then return redis.error_reply('ERR_ENCODE Document: ' .. (err_enc or 'unknown')) end
+    redis.call('SET', key, new_doc_json_str)
+    return #target_array_ref
+)lua";
+
+const std::string LuaScriptManager::JSON_ARRAY_PREPEND_LUA = LUA_COMMON_HELPERS + R"lua(
+    local key = KEYS[1]
+    local path_str = ARGV[1]
+    local value_json_str = ARGV[2]
+    local current_json_str = redis.call('GET', key)
+    if not current_json_str then return redis.error_reply('ERR_NOKEY Key not found') end
+    local doc, err = cjson.decode(current_json_str)
+    if not doc then return redis.error_reply('ERR_DECODE Invalid JSON: ' .. (err or 'unknown')) end
+    local value_to_prepend, err_val = cjson.decode(value_json_str)
+    if not value_to_prepend and value_json_str ~= 'null' then return redis.error_reply('ERR_DECODE_ARG Value: ' .. (err_val or 'unknown')) end
+    
+    local target_array_ref = doc
+    if path_str ~= '$' and path_str ~= '' then
+        local path_segments = parse_path(path_str)
+        if path_segments == nil then return redis.error_reply('ERR_PATH Invalid path string: ' .. path_str) end
+        target_array_ref = get_value_at_path(doc, path_segments)
+    end
+
+    if target_array_ref == nil then return redis.error_reply('ERR_NOPATH Path not found') end
+    if type(target_array_ref) ~= 'table' then return "ERR_NOT_ARRAY" end
+    table.insert(target_array_ref, 1, value_to_prepend)
+    
+    local new_doc_json_str, err_enc = cjson.encode(doc)
+    if not new_doc_json_str then return redis.error_reply('ERR_ENCODE Document: ' .. (err_enc or 'unknown')) end
+    redis.call('SET', key, new_doc_json_str)
+    return #target_array_ref
+)lua";
+
+const std::string LuaScriptManager::JSON_ARRAY_POP_LUA = LUA_COMMON_HELPERS + R"lua(
+    local key = KEYS[1]
+    local path_str = ARGV[1]
+    local index_str = ARGV[2] 
+    local current_json_str = redis.call('GET', key)
+    if not current_json_str then return nil end 
+    local doc, err = cjson.decode(current_json_str)
+    if not doc then return redis.error_reply('ERR_DECODE Invalid JSON: ' .. (err or 'unknown')) end
+
+    local target_array_ref = doc
+    if path_str ~= '$' and path_str ~= '' then
+        local path_segments = parse_path(path_str)
+        if path_segments == nil then return redis.error_reply('ERR_PATH Invalid path string: ' .. path_str) end
+        target_array_ref = get_value_at_path(doc, path_segments)
+    end
+
+    if target_array_ref == nil or type(target_array_ref) ~= 'table' then return nil end 
+    local index = tonumber(index_str)
+    if index == nil then return redis.error_reply('ERR_INDEX Invalid index: not a number') end
+
+    -- Adjust C++ index (0-based, -1 for last) to Lua 1-based index
+    local len = #target_array_ref
+    if index == -1 then index = len 
+    elseif index >= 0 and index < len then index = index + 1
+    else return nil -- Index out of bounds based on C++ 0-based convention
+    end
+
+    if index < 1 or index > len or len == 0 then return nil end
+
+    local popped_value = table.remove(target_array_ref, index)
+    local new_doc_json_str, err_enc = cjson.encode(doc)
+    if not new_doc_json_str then return redis.error_reply('ERR_ENCODE Document: ' .. (err_enc or 'unknown')) end
+    redis.call('SET', key, new_doc_json_str)
+    return cjson.encode(popped_value) 
+)lua";
+
+const std::string LuaScriptManager::JSON_ARRAY_LENGTH_LUA = LUA_COMMON_HELPERS + R"lua(
+    local key = KEYS[1]
+    local path_str = ARGV[1]
+    local current_json_str = redis.call('GET', key)
+    if not current_json_str then return nil end 
+    local doc, err = cjson.decode(current_json_str)
+    if not doc then return redis.error_reply('ERR_DECODE Invalid JSON: ' .. (err or 'unknown')) end
+
+    local target_array_ref = doc
+    if path_str ~= '$' and path_str ~= '' then
+        local path_segments = parse_path(path_str)
+        if path_segments == nil then return redis.error_reply('ERR_PATH Invalid path string: ' .. path_str) end
+        target_array_ref = get_value_at_path(doc, path_segments)
+    end
+    if target_array_ref == nil or type(target_array_ref) ~= 'table' then return nil end 
+    return #target_array_ref
+)lua";
+
+const std::string LuaScriptManager::ATOMIC_JSON_GET_SET_PATH_LUA = LUA_COMMON_HELPERS + R"lua(
+    local key = KEYS[1]
+    local path_str = ARGV[1]
+    local new_value_json_str = ARGV[2]
+    local current_json_str = redis.call('GET', key)
+    local current_doc
+    local old_value_encoded = cjson.encode(nil) 
+
+    if not current_json_str then current_doc = {} else
+        local err_dec_curr
+        current_doc, err_dec_curr = cjson.decode(current_json_str)
+        if not current_doc then return redis.error_reply('ERR_DECODE Existing JSON: ' .. (err_dec_curr or 'unknown')) end
+        if path_str == '$' or path_str == '' then old_value_encoded = cjson.encode(current_doc) else
+            local path_segments_old = parse_path(path_str)
+            if path_segments_old == nil then return redis.error_reply('ERR_PATH Invalid path for old value: ' .. path_str) end
+            local old_value = get_value_at_path(current_doc, path_segments_old)
+            old_value_encoded = cjson.encode(old_value)
+        end
+    end
+
+    local new_value, err_val = cjson.decode(new_value_json_str)
+    if not new_value and new_value_json_str ~= 'null' then return redis.error_reply('ERR_DECODE_ARG New value: ' .. (err_val or 'unknown')) end
+    
+    if path_str == '$' or path_str == '' then 
+         if type(new_value) ~= 'table' and new_value_json_str ~= 'null' then return redis.error_reply('ERR_ROOT_TYPE Root must be object/array/null') end
+        current_doc = new_value
+    else
+        local path_segments_set = parse_path(path_str)
+        if path_segments_set == nil then return redis.error_reply('ERR_PATH Invalid path for set: ' .. path_str) end
+        local success, err_set = set_value_at_path(current_doc, path_segments_set, new_value, true) 
+        if not success then return redis.error_reply('ERR_SET_PATH ' .. err_set) end
+    end
+    
+    local final_doc_str, err_enc = cjson.encode(current_doc)
+    if not final_doc_str then return redis.error_reply('ERR_ENCODE Final doc: ' .. (err_enc or 'unknown')) end
+    redis.call('SET', key, final_doc_str)
+    return old_value_encoded
+)lua";
+
+const std::string LuaScriptManager::ATOMIC_JSON_COMPARE_SET_PATH_LUA = LUA_COMMON_HELPERS + R"lua(
     local key = KEYS[1]
     local path_str = ARGV[1]
     local expected_value_json_str = ARGV[2]
     local new_value_json_str = ARGV[3]
-
     local current_json_str = redis.call('GET', key)
+    local current_doc
+    local actual_value_at_path
+
     if not current_json_str then
-        return 0 -- False: key does not exist
-    end
-
-    local current_doc = cjson.decode(current_json_str)
-    local expected_value = cjson.decode(expected_value_json_str)
-    local new_value = cjson.decode(new_value_json_str)
-
-    -- Simplified path handling
-    local actual_value_at_path = current_doc[path_str]
-
-    -- Note: Comparing JSON objects/arrays for equality in Lua can be tricky.
-    -- This simple comparison might not work for complex types.
-    -- Usually, deep comparison or comparing their string encodings is needed.
-    -- For this placeholder, assume direct comparison works for simple values.
-    if actual_value_at_path == expected_value then
-        current_doc[path_str] = new_value
-        redis.call('SET', key, cjson.encode(current_doc))
-        return 1 -- True: success
+        if expected_value_json_str == cjson.encode(nil) then actual_value_at_path = nil else return 0 end
+        current_doc = {} 
     else
-        return 0 -- False: comparison failed
+        local err_dec_curr
+        current_doc, err_dec_curr = cjson.decode(current_json_str)
+        if not current_doc then return redis.error_reply('ERR_DECODE Existing JSON: ' .. (err_dec_curr or 'unknown')) end
+        if path_str == '$' or path_str == '' then actual_value_at_path = current_doc else
+            local path_segments_get = parse_path(path_str)
+            if path_segments_get == nil then return redis.error_reply('ERR_PATH Invalid path for get: ' .. path_str) end
+            actual_value_at_path = get_value_at_path(current_doc, path_segments_get)
+        end
     end
-)lua";
 
-const std::string LuaScriptManager::ATOMIC_JSON_GET_SET_PATH_LUA = R"lua(
--- KEYS[1]: key
--- ARGV[1]: path
--- ARGV[2]: new_value (JSON string)
-local current_value_str = redis.call('JSON.GET', KEYS[1], ARGV[1])
-redis.call('JSON.SET', KEYS[1], ARGV[1], ARGV[2])
-return current_value_str
-)lua";
+    local actual_value_encoded = cjson.encode(actual_value_at_path)
 
-const std::string LuaScriptManager::ATOMIC_JSON_COMPARE_SET_PATH_LUA = R"lua(
--- KEYS[1]: key
--- ARGV[1]: path
--- ARGV[2]: expected_value (JSON string)
--- ARGV[3]: new_value (JSON string)
-local current_value_lua_str = redis.call('JSON.GET', KEYS[1], ARGV[1])
-local expected_value_json_str = ARGV[2]
--- If path does not exist, JSON.GET returns Lua boolean false.
-if current_value_lua_str == false then
-    -- If expected value is the JSON literal "null", treat non-existence as matching "null".
-    if expected_value_json_str == "null" then
-        redis.call('JSON.SET', KEYS[1], ARGV[1], ARGV[3])
-        return 1 -- Set succeeded
+    if actual_value_encoded == expected_value_json_str then
+        local new_value, err_val = cjson.decode(new_value_json_str)
+        if not new_value and new_value_json_str ~= 'null' then return redis.error_reply('ERR_DECODE_ARG New value CAS: ' .. (err_val or 'unknown')) end
+        
+        if path_str == '$' or path_str == '' then 
+            if type(new_value) ~= 'table' and new_value_json_str ~= 'null' then return redis.error_reply('ERR_ROOT_TYPE Root CAS: object/array/null') end
+            current_doc = new_value
+        else
+            local path_segments_set = parse_path(path_str)
+            if path_segments_set == nil then return redis.error_reply('ERR_PATH Invalid path for set CAS: ' .. path_str) end
+            local success, err_set = set_value_at_path(current_doc, path_segments_set, new_value, true)
+            if not success then return redis.error_reply('ERR_SET_PATH CAS: ' .. err_set) end
+        end
+        local final_doc_str, err_enc = cjson.encode(current_doc)
+        if not final_doc_str then return redis.error_reply('ERR_ENCODE Final doc CAS: ' .. (err_enc or 'unknown')) end
+        redis.call('SET', key, final_doc_str)
+        return 1
     else
-        return 0 -- Path not found and expected was not "null"
+        return 0
     end
-end
--- Path exists, current_value_lua_str is a JSON string (e.g., "\"foo\"", "123", "{\"a\":1}", "null")
-if current_value_lua_str == expected_value_json_str then
-    redis.call('JSON.SET', KEYS[1], ARGV[1], ARGV[3])
-    return 1 -- Set succeeded
-else
-    return 0 -- Value did not match
-end
 )lua";
 
-
-// --- LuaScriptManager Implementation ---
 LuaScriptManager::LuaScriptManager(RedisConnectionManager* conn_manager)
     : connection_manager_(conn_manager) {
     if (!conn_manager) {
@@ -119,76 +468,89 @@ LuaScriptManager::LuaScriptManager(RedisConnectionManager* conn_manager)
 }
 
 LuaScriptManager::~LuaScriptManager() {
-    // Local SHA cache (script_shas_) is cleaned up by its destructor.
-    // No ownership of connection_manager_.
+    // Destructor remains the same
 }
 
 void LuaScriptManager::load_script(const std::string& name, const std::string& script_body) {
     if (name.empty() || script_body.empty()) {
         throw std::invalid_argument("Script name and body cannot be empty.");
     }
-
-    auto conn_guard = connection_manager_->get_connection(); // This will throw if simplified get_connection fails
+    auto conn_guard = connection_manager_->get_connection();
     RedisConnection* conn = conn_guard.get();
     if (!conn || !conn->is_connected()) {
         throw ConnectionException("Failed to get valid Redis connection for SCRIPT LOAD.");
     }
-
-    redisReply* reply = conn->command("SCRIPT LOAD %s", script_body.c_str());
-
+    RedisReplyPtr reply(static_cast<redisReply*>(conn->command("SCRIPT LOAD %s", script_body.c_str())));
     if (!reply) {
         throw RedisCommandException("SCRIPT LOAD", "No reply from Redis (connection error: " + (conn->get_context() ? std::string(conn->get_context()->errstr) : "unknown") + ")");
     }
-
     std::string sha1_hash;
     if (reply->type == REDIS_REPLY_STRING) {
         sha1_hash = std::string(reply->str, reply->len);
     } else if (reply->type == REDIS_REPLY_ERROR) {
         std::string err_msg = std::string(reply->str, reply->len);
-        freeReplyObject(reply);
         throw RedisCommandException("SCRIPT LOAD", err_msg);
     } else {
-        // Unexpected reply type
-        freeReplyObject(reply);
         throw RedisCommandException("SCRIPT LOAD", "Unexpected reply type: " + std::to_string(reply->type));
     }
-
-    freeReplyObject(reply);
-
     if (sha1_hash.empty()) {
          throw RedisCommandException("SCRIPT LOAD", "Failed to load script, SHA1 hash is empty.");
     }
-
     std::lock_guard<std::mutex> lock(cache_mutex_);
     script_shas_[name] = sha1_hash;
 }
 
 json LuaScriptManager::redis_reply_to_json(redisReply* reply) const {
-    if (!reply) return json(nullptr); // Or throw? Depending on context.
+    if (!reply) return json(nullptr);
 
     switch (reply->type) {
         case REDIS_REPLY_STRING:
-        case REDIS_REPLY_STATUS: // Status often contains simple strings like "OK"
-            // Attempt to parse as JSON string. If script returns plain string, it might be an error or simple value.
-            // For scripts designed to return JSON, the string reply *is* the JSON.
-            try {
-                return json::parse(reply->str, reply->str + reply->len);
-            } catch (const json::parse_error& e) {
-                // If it's not valid JSON, but a simple string, what to do?
-                // For now, assume scripts always return valid JSON strings or handle errors via REDIS_REPLY_ERROR.
-                // If a script is meant to return a non-JSON string, this needs adjustment.
-                // Or, it could be a JSON string that happens to be simple, like "\"OK\"".
-                // Let's be strict: if it's a string reply from EVALSHA, it should be a JSON string.
-                throw JsonParsingException("Failed to parse script string output as JSON: " + std::string(e.what()) + ", content: " + std::string(reply->str, reply->len));
+        case REDIS_REPLY_STATUS: {
+            std::string reply_str(reply->str, reply->len);
+            // Heuristic to decide if it's a JSON string or a simple status/error string from Lua
+            if ((!reply_str.empty() && (reply_str[0] == '{' || reply_str[0] == '[' || reply_str[0] == '"')) ||
+                reply_str == "null" || reply_str == "true" || reply_str == "false") {
+                try {
+                    return json::parse(reply_str);
+                } catch (const json::parse_error& e) {
+                    // It looked like JSON but failed to parse, this is an issue.
+                    throw JsonParsingException("Failed to parse script string output as JSON: " + std::string(e.what()) + ", content: " + reply_str);
+                }
             }
+            // Check if it's a number string
+            bool is_numeric = true;
+            if (reply_str.empty()) is_numeric = false;
+            else {
+                size_t i = 0;
+                if (reply_str[0] == '-') i = 1;
+                for (; i < reply_str.length(); ++i) {
+                    if (!std::isdigit(reply_str[i]) && reply_str[i] != '.') {
+                        is_numeric = false;
+                        break;
+                    }
+                }
+            }
+            if (is_numeric) {
+                 try {
+                    // Try to parse as number if it looks like one (e.g. "123", "0.5")
+                    // This might still fail for things like "1.2.3"
+                    // A stricter check might be needed or rely on Lua to return proper types / JSON strings.
+                    size_t processed_chars = 0;
+                    double num_val = std::stod(reply_str, &processed_chars);
+                    if (processed_chars == reply_str.length()){ // ensure full string was consumed
+                        if (num_val == static_cast<long long>(num_val)) return json(static_cast<long long>(num_val));
+                        return json(num_val);
+                    }
+                 } catch (const std::exception&) { /* Not a valid number, treat as string below */ }
+            }
+            // Otherwise, treat as a simple string value (e.g. "OK", "ERR_NOT_ARRAY")
+            return json(reply_str);
+        }
         case REDIS_REPLY_INTEGER:
-            return json(reply->integer); // Convert integer to JSON number
+            return json(reply->integer);
         case REDIS_REPLY_NIL:
-            return json(nullptr); // JSON null
+            return json(nullptr);
         case REDIS_REPLY_ARRAY: {
-            // Lua scripts can return tables, which hiredis maps to REDIS_REPLY_ARRAY.
-            // Each element of the array also needs conversion.
-            // This is important if a script returns a list of JSON strings or mixed types.
             json::array_t arr;
             for (size_t i = 0; i < reply->elements; ++i) {
                 arr.push_back(redis_reply_to_json(reply->element[i]));
@@ -196,14 +558,11 @@ json LuaScriptManager::redis_reply_to_json(redisReply* reply) const {
             return arr;
         }
         case REDIS_REPLY_ERROR:
-            // This is an error FROM THE SCRIPT ITSELF (e.g. Lua runtime error)
-            // or Redis error like OOM.
             throw LuaScriptException("<unknown script, error from reply>", std::string(reply->str, reply->len));
         default:
             throw RedisCommandException("EVALSHA/SCRIPT", "Unexpected Redis reply type: " + std::to_string(reply->type));
     }
 }
-
 
 json LuaScriptManager::execute_script(const std::string& name,
                                     const std::vector<std::string>& keys,
@@ -213,7 +572,7 @@ json LuaScriptManager::execute_script(const std::string& name,
         std::lock_guard<std::mutex> lock(cache_mutex_);
         auto it = script_shas_.find(name);
         if (it == script_shas_.end()) {
-            throw LuaScriptException(name, "Script not loaded or SHA not found in local cache.");
+            throw LuaScriptException(name, "Script not loaded or SHA not found in local cache. Script Name: " + name);
         }
         sha1_hash = it->second;
     }
@@ -224,20 +583,15 @@ json LuaScriptManager::execute_script(const std::string& name,
         throw ConnectionException("Failed to get valid Redis connection for EVALSHA.");
     }
 
-    // Construct argv for redisCommandArgv: "EVALSHA", sha1, num_keys, key1, key2, ..., arg1, arg2, ...
     std::vector<const char*> argv_c;
     std::vector<size_t> argv_len;
-
     argv_c.push_back("EVALSHA");
     argv_len.push_back(strlen("EVALSHA"));
-
     argv_c.push_back(sha1_hash.c_str());
     argv_len.push_back(sha1_hash.length());
-
     std::string num_keys_str = std::to_string(keys.size());
     argv_c.push_back(num_keys_str.c_str());
     argv_len.push_back(num_keys_str.length());
-
     for (const auto& key : keys) {
         argv_c.push_back(key.c_str());
         argv_len.push_back(key.length());
@@ -247,85 +601,35 @@ json LuaScriptManager::execute_script(const std::string& name,
         argv_len.push_back(arg.length());
     }
 
-    redisReply* reply = conn->command_argv(argv_c.size(), argv_c.data(), argv_len.data());
+    RedisReplyPtr reply(static_cast<redisReply*>(conn->command_argv(argv_c.size(), argv_c.data(), argv_len.data())));
 
     if (!reply) {
-         throw RedisCommandException("EVALSHA", "No reply from Redis (connection error: " + (conn->get_context() ? std::string(conn->get_context()->errstr) : "unknown") + ")");
+         throw RedisCommandException("EVALSHA", "No reply from Redis (connection error: " + (conn->get_context() ? std::string(conn->get_context()->errstr) : "unknown") + ") for script " + name);
     }
 
-    // Handle NOSCRIPT error: try to reload the script and retry ONCE.
     if (reply->type == REDIS_REPLY_ERROR && strncmp(reply->str, "NOSCRIPT", 8) == 0) {
-        freeReplyObject(reply);
-        reply = nullptr; // Important: nullify before potential re-assignment
-
-        // Attempt to find the original script body to reload.
-        // This requires storing original scripts if we want to auto-reload.
-        // For now, assume preload_builtin_scripts or manual load_script was called.
-        // If the script was ad-hoc loaded and not built-in, we can't easily get its body here
-        // unless we also cache script bodies by name (which script_shas_ doesn't do).
-        // This is a limitation of the current design if scripts can be flushed from Redis.
-
-        // Simplification: For now, do not attempt auto-reload. Client should ensure scripts are loaded.
-        // Or, `load_script` could be more intelligent (SCRIPT EXISTS before LOAD).
-        // A robust solution would re-load the script using its original body (if cached by LuaScriptManager)
-        // and then retry EVALSHA.
-
-        // For this iteration, NOSCRIPT is a fatal error for this execution attempt.
-        // {
-        //    std::lock_guard<std::mutex> lock(cache_mutex_);
-        //    script_shas_.erase(name); // Remove potentially stale SHA
-        // }
-        // throw LuaScriptException(name, "Script not found on server (NOSCRIPT). Consider reloading.");
-
-        // Let's try to re-load if it's a known built-in script (conceptual - needs script body access)
-        // This part is tricky as we need the script body.
-        // For now, just throw:
-        std::string noscript_error = std::string(reply->str, reply->len);
-        freeReplyObject(reply);
-        throw LuaScriptException(name, "Script not found on server (NOSCRIPT): " + noscript_error + ". Reload script and retry.");
+        std::string noscript_error_msg = std::string(reply->str, reply->len);
+        // In a more robust system, one might attempt to reload the specific script here.
+        // For now, just propagate the error clearly.
+        throw LuaScriptException(name, "Script not found on server (NOSCRIPT): " + noscript_error_msg + ". Consider reloading scripts if SCRIPT FLUSH occurred.");
     }
-
-    json result_json;
-    try {
-        result_json = redis_reply_to_json(reply); // This can throw LuaScriptException for script runtime errors
-    } catch (const LuaScriptException& e) { // Catch script error from redis_reply_to_json
-        freeReplyObject(reply);
-        throw LuaScriptException(name, "Error during script execution: " + std::string(e.what()));
-    } catch (...) { // Catch other parsing errors etc.
-        freeReplyObject(reply);
-        throw;
-    }
-
-    freeReplyObject(reply);
-    return result_json;
+    // If the reply is an error from the script itself (not NOSCRIPT), redis_reply_to_json will throw LuaScriptException.
+    return redis_reply_to_json(reply.get());
 }
 
-
 void LuaScriptManager::preload_builtin_scripts() {
-    // Example of preloading. In a real app, script bodies would be more robustly managed.
     try {
-        // Load new scripts for RedisJSON path operations
+        load_script("json_path_get", JSON_PATH_GET_LUA);
+        load_script("json_path_set", JSON_PATH_SET_LUA);
+        load_script("json_path_del", JSON_PATH_DEL_LUA);
+        load_script("json_path_type", JSON_PATH_TYPE_LUA);
+        load_script("json_array_append", JSON_ARRAY_APPEND_LUA);
+        load_script("json_array_prepend", JSON_ARRAY_PREPEND_LUA);
+        load_script("json_array_pop", JSON_ARRAY_POP_LUA);
+        load_script("json_array_length", JSON_ARRAY_LENGTH_LUA);
         load_script("atomic_json_get_set_path", ATOMIC_JSON_GET_SET_PATH_LUA);
         load_script("atomic_json_compare_set_path", ATOMIC_JSON_COMPARE_SET_PATH_LUA);
-
-        // Reviewing old scripts:
-        // The old JSON_GET_SET_LUA and JSON_COMPARE_SET_LUA operate on full key GET/SET
-        // and assume Lua-side JSON parsing (cjson) for path-like operations.
-        // These might be useful for a generic Redis client but are less ideal for a RedisJSON specific client
-        // if path operations are intended to use RedisJSON's native path support.
-        // For now, I will comment them out from preloading to avoid confusion,
-        // unless they are explicitly needed for other functionalities not covered by current TODOs.
-        // load_script("json_get_set", JSON_GET_SET_LUA);
-        // load_script("json_compare_set", JSON_COMPARE_SET_LUA);
-        // ... load other built-in scripts if any ...
-        // load_script("json_merge.lua", JSON_MERGE_LUA); // Example, if a Lua based merge was needed
-        // load_script("json_array_ops.lua", JSON_ARRAY_OPS_LUA); // Example
-        // load_script("json_search.lua", JSON_SEARCH_LUA);
-
     } catch (const RedisJSONException& e) {
-        // Failed to preload one or more scripts. This could be a critical setup error.
-        // Log this error. Depending on policy, may rethrow or continue.
-        // For now, rethrow as it might leave the client in an inconsistent state.
         throw LuaScriptException("preload_builtin_scripts", "Failed to load a built-in script: " + std::string(e.what()));
     }
 }
@@ -341,25 +645,14 @@ void LuaScriptManager::clear_all_scripts_cache() {
     if (!conn || !conn->is_connected()) {
         throw ConnectionException("Failed to get valid Redis connection for SCRIPT FLUSH.");
     }
-
-    redisReply* reply = conn->command("SCRIPT FLUSH");
+    RedisReplyPtr reply(static_cast<redisReply*>(conn->command("SCRIPT FLUSH")));
     if (!reply) {
          throw RedisCommandException("SCRIPT FLUSH", "No reply from Redis (connection error: " + (conn->get_context() ? std::string(conn->get_context()->errstr) : "unknown") + ")");
     }
-
     if (reply->type == REDIS_REPLY_ERROR) {
         std::string err_msg = std::string(reply->str, reply->len);
-        freeReplyObject(reply);
         throw RedisCommandException("SCRIPT FLUSH", err_msg);
     }
-    // Typically SCRIPT FLUSH returns "OK" on success
-    if (!(reply->type == REDIS_REPLY_STATUS && strcmp(reply->str, "OK") == 0)) {
-         // Log unexpected success reply, but proceed to clear local cache
-    }
-
-    freeReplyObject(reply);
-
-    // Clear local cache as well
     clear_local_script_cache();
 }
 
