@@ -160,438 +160,255 @@ void RedisJSONClient::del_json(const std::string& key) {
 // --- Path Operations ---
 
 json RedisJSONClient::get_path(const std::string& key, const std::string& path) const {
-    std::unique_ptr<RedisConnection> conn = get_redis_connection();
-
-    RedisReplyPtr reply(static_cast<redisReply*>(
-        conn->command("JSON.GET %s %s", key.c_str(), path.c_str())
-    ));
-
-    if (!reply) {
-        _connection_manager->return_connection(std::move(conn));
-        throw RedisCommandException("JSON.GET", "Key: " + key + ", Path: " + path + ", Error: No reply or connection error");
+    if (!_lua_script_manager) {
+        throw RedisJSONException("LuaScriptManager is not initialized for get_path.");
     }
+    // TODO: Use _path_parser->parse(path) and pass structured path to Lua if script supports it.
+    // For now, pass path string directly.
+    std::vector<std::string> keys = {key};
+    std::vector<std::string> args = {path};
 
-    if (reply->type == REDIS_REPLY_ERROR) {
-        _connection_manager->return_connection(std::move(conn));
-        throw RedisCommandException("JSON.GET", "Key: " + key + ", Path: " + path + ", Error: " + (reply->str ? reply->str : "Redis error reply with no message"));
-    }
-
-    if (reply->type == REDIS_REPLY_NIL) {
-        _connection_manager->return_connection(std::move(conn));
-        throw PathNotFoundException(key, path);
-    }
-
-    if (reply->type == REDIS_REPLY_STRING) {
-        std::string result_str = reply->str;
-        _connection_manager->return_connection(std::move(conn));
-        try {
-            // JSON.GET for a path can return an array of values if the path is a multi-path expression,
-            // or a single JSON value if the path points to a single value.
-            // The result is always a string that needs to be parsed as JSON.
-            // If it's a single value (e.g. a number like `42` or a string like `"hello"`), 
-            // nlohmann::json::parse will handle it correctly.
-            // If it's an array of values (e.g. `[1,2,3]`), it will also be parsed correctly.
-            return _parse_json_reply(result_str, "JSON.GET for key '" + key + "', path '" + path + "'");
-        } catch (const JsonParsingException& e) {
-            // Rethrow if it's already a JsonParsingException from _parse_json_reply
-            throw;
-        } catch (const json::parse_error& e) {
-            // Catch other potential parse errors from nlohmann::json directly
-            throw JsonParsingException("Failed to parse JSON.GET response for key '" + key + "', path '" + path + "': " + e.what() + ". Received: " + result_str);
+    try {
+        json result = _lua_script_manager->execute_script("json_path_get", keys, args);
+        // Lua script for get_path should return the JSON value at path, or null if not found.
+        // If path not found, LuaScriptManager::redis_reply_to_json converts Redis NIL to json(nullptr)
+        if (result.is_null()) {
+            throw PathNotFoundException(key, path);
         }
+        return result;
+    } catch (const LuaScriptException& e) {
+        // Check if the Lua error message indicates "path not found" or similar if script signals this way
+        // For now, assume any LuaScriptException for get means a problem beyond simple not found.
+        // Or, specific error codes from Lua could be translated.
+        throw RedisCommandException("LUA_json_path_get", "Key: " + key + ", Path: " + path + ", Error: " + e.what());
+    } catch (const PathNotFoundException& e) {
+        throw; // Rethrow if script explicitly signals PathNotFound via a specific reply handled by execute_script or redis_reply_to_json
+    } catch (const RedisJSONException& e) {
+        throw; // Rethrow other RedisJSON specific errors
     }
-
-    _connection_manager->return_connection(std::move(conn));
-    throw RedisCommandException("JSON.GET", "Key: " + key + ", Path: " + path + ", Error: Unexpected reply type from Redis: " + std::to_string(reply->type));
 }
 
 void RedisJSONClient::set_path(const std::string& key, const std::string& path,
                                const json& value, const SetOptions& opts) {
-    std::unique_ptr<RedisConnection> conn = get_redis_connection();
+    if (!_lua_script_manager) {
+        throw RedisJSONException("LuaScriptManager is not initialized for set_path.");
+    }
     std::string value_str = value.dump();
-    RedisReplyPtr reply;
-
-    std::string command_str = "JSON.SET " + key + " " + path + " '" + value_str + "'"; // Basic command
-    // Note: Directly embedding value_str can be problematic if it contains spaces or special characters
-    // not handled by hiredis variadic command formatting.
-    // It's safer to pass it as a separate argument to conn->command.
-
-    if (opts.condition == SetCmdCondition::NX) {
-        reply = RedisReplyPtr(static_cast<redisReply*>(
-            conn->command("JSON.SET %s %s %s NX", key.c_str(), path.c_str(), value_str.c_str())
-        ));
-    } else if (opts.condition == SetCmdCondition::XX) {
-        reply = RedisReplyPtr(static_cast<redisReply*>(
-            conn->command("JSON.SET %s %s %s XX", key.c_str(), path.c_str(), value_str.c_str())
-        ));
-    } else { // Condition::NONE or default
-        reply = RedisReplyPtr(static_cast<redisReply*>(
-            conn->command("JSON.SET %s %s %s", key.c_str(), path.c_str(), value_str.c_str())
-        ));
+    std::string condition_str;
+    switch (opts.condition) {
+        case SetCmdCondition::NX: condition_str = "NX"; break;
+        case SetCmdCondition::XX: condition_str = "XX"; break;
+        case SetCmdCondition::NONE: condition_str = "NONE"; break; // Or "" if Lua script expects that for no condition
     }
 
-    if (!reply) {
-        _connection_manager->return_connection(std::move(conn));
-        throw RedisCommandException("JSON.SET", "Key: " + key + ", Path: " + path + ", Error: No reply or connection error");
-    }
+    std::vector<std::string> keys = {key};
+    std::vector<std::string> args = {
+        path,
+        value_str,
+        condition_str,
+        std::to_string(opts.ttl.count()),
+        opts.create_path ? "true" : "false" // Added create_path option
+    };
 
-    if (reply->type == REDIS_REPLY_ERROR) {
-        _connection_manager->return_connection(std::move(conn));
-        throw RedisCommandException("JSON.SET", "Key: " + key + ", Path: " + path + ", Error: " + (reply->str ? reply->str : "Redis error reply with no message"));
-    }
-
-    // JSON.SET returns "OK" on success.
-    // If NX or XX is used, it returns NULL if the condition is not met.
-    if (reply->type == REDIS_REPLY_NIL) {
-        // This means condition (NX or XX) was not met. This is not an "error" but a failed conditional set.
-        // The current function signature is void, so we can't directly return false.
-        // We could throw a specific exception like ConditionNotMetException, or just return.
-        // For now, let's assume that if a condition is specified and not met, it's not an error
-        // that should halt execution by throwing, but the operation didn't proceed.
-        // If the SetOptions also included TTL, that part would be ignored by Redis.
-        _connection_manager->return_connection(std::move(conn));
-        // If we need to signal this specific outcome, the function signature or an output parameter would be needed.
-        // For now, just returning normally implies the command was sent and Redis replied without error.
-        return;
-    }
-
-    if (reply->type == REDIS_REPLY_STATUS && strcmp(reply->str, "OK") == 0) {
-        // Success
-        // Now, handle TTL if specified. JSON.SET itself doesn't take TTL.
-        // We need to use a separate EXPIRE command if opts.ttl is set.
-        // This is not atomic with the JSON.SET. For atomicity, a Lua script would be needed.
-        if (opts.ttl.count() > 0) {
-            RedisReplyPtr expire_reply(static_cast<redisReply*>(
-                conn->command("EXPIRE %s %lld", key.c_str(), (long long)opts.ttl.count())
-            ));
-            if (!expire_reply || expire_reply->type == REDIS_REPLY_ERROR) {
-                // Log this error? Or throw? If EXPIRE fails, the SET was still successful.
-                // For now, let's throw as it's an unexpected error in a dependent command.
-                _connection_manager->return_connection(std::move(conn));
-                throw RedisCommandException("EXPIRE", "Failed to set TTL for key " + key + " after JSON.SET. Error: " + (expire_reply && expire_reply->str ? expire_reply->str : "Unknown error"));
-            }
+    try {
+        json result = _lua_script_manager->execute_script("json_path_set", keys, args);
+        // Lua script for set_path should return a status, e.g., 1 for OK, 0 for condition not met.
+        // If result is json(nullptr) or a specific value indicating condition not met (e.g. 0)
+        if (result.is_boolean() && !result.get<bool>()) { // Assuming script returns true on success, false on NX/XX fail
+             // Condition (NX/XX) not met, or other failure indicated by 'false'
+             // This part needs careful coordination with Lua script's return value.
+             // For now, if it's explicitly false, assume condition not met and do not throw.
+             return;
         }
-        _connection_manager->return_connection(std::move(conn));
-        return;
-    }
+        if (result.is_null()) { // Alternative: script returns null if condition not met
+            return; // Condition not met
+        }
+        // If an error occurred within Lua that wasn't a typical Redis error (caught as LuaScriptException),
+        // it might come as a non-true/non-null value. Or script throws error string.
+        // The LuaScriptManager::execute_script and redis_reply_to_json should ideally parse known success/failure indicators.
 
-    // Unexpected reply
-    _connection_manager->return_connection(std::move(conn));
-    throw RedisCommandException("JSON.SET", "Key: " + key + ", Path: " + path + ", Error: Unexpected reply: " + (reply->str ? reply->str : "Unknown reply type/status"));
+    } catch (const LuaScriptException& e) {
+        // Specific Lua errors might indicate "key does not exist" for XX, or "path exists" for NX if script handles this.
+        // For now, generic error.
+        throw RedisCommandException("LUA_json_path_set", "Key: " + key + ", Path: " + path + ", Error: " + e.what());
+    } catch (const RedisJSONException& e) {
+        throw;
+    }
 }
 
 void RedisJSONClient::del_path(const std::string& key, const std::string& path) {
-    std::unique_ptr<RedisConnection> conn = get_redis_connection();
-
-    RedisReplyPtr reply(static_cast<redisReply*>(
-        conn->command("JSON.DEL %s %s", key.c_str(), path.c_str())
-    ));
-
-    if (!reply) {
-        _connection_manager->return_connection(std::move(conn));
-        throw RedisCommandException("JSON.DEL", "Key: " + key + ", Path: " + path + ", Error: No reply or connection error");
+    if (!_lua_script_manager) {
+        throw RedisJSONException("LuaScriptManager is not initialized for del_path.");
     }
+    std::vector<std::string> keys = {key};
+    std::vector<std::string> args = {path};
 
-    if (reply->type == REDIS_REPLY_ERROR) {
-        _connection_manager->return_connection(std::move(conn));
-        throw RedisCommandException("JSON.DEL", "Key: " + key + ", Path: " + path + ", Error: " + (reply->str ? reply->str : "Redis error reply with no message"));
+    try {
+        json result = _lua_script_manager->execute_script("json_path_del", keys, args);
+        // Lua script should return number of paths deleted (e.g., 0 or 1).
+        // If result is 0, it means path was not found or key did not exist, which is not an error for DEL.
+        // If LuaScriptManager returns integer as json number:
+        if (result.is_number_integer()) {
+            // int deleted_count = result.get<int>();
+            // No specific action based on count for void return type.
+            return;
+        }
+        // If script indicates error in other ways, it should be caught by LuaScriptException.
+    } catch (const LuaScriptException& e) {
+        throw RedisCommandException("LUA_json_path_del", "Key: " + key + ", Path: " + path + ", Error: " + e.what());
+    } catch (const RedisJSONException& e) {
+        throw;
     }
-
-    // JSON.DEL returns an integer: the number of paths deleted (0 or 1 in this case, as we provide a single path).
-    // If the key or path does not exist, it returns 0. This is not an error.
-    if (reply->type == REDIS_REPLY_INTEGER) {
-        // int paths_deleted = reply->integer;
-        // We don't need to do anything with paths_deleted for a void function,
-        // unless we want to throw if it's 0, but that's usually not the behavior for DEL.
-        _connection_manager->return_connection(std::move(conn));
-        return;
-    }
-
-    _connection_manager->return_connection(std::move(conn));
-    throw RedisCommandException("JSON.DEL", "Key: " + key + ", Path: " + path + ", Error: Unexpected reply type from Redis: " + std::to_string(reply->type));
 }
 
 bool RedisJSONClient::exists_path(const std::string& key, const std::string& path) const {
-    std::unique_ptr<RedisConnection> conn = get_redis_connection();
-
-    RedisReplyPtr reply(static_cast<redisReply*>(
-        conn->command("JSON.TYPE %s %s", key.c_str(), path.c_str())
-    ));
-
-    if (!reply) {
-        _connection_manager->return_connection(std::move(conn));
-        // Distinguish between no reply and actual "not found"
-        throw RedisCommandException("JSON.TYPE", "Key: " + key + ", Path: " + path + ", Error: No reply or connection error");
+    if (!_lua_script_manager) {
+        throw RedisJSONException("LuaScriptManager is not initialized for exists_path.");
     }
+    std::vector<std::string> keys = {key};
+    std::vector<std::string> args = {path};
 
-    if (reply->type == REDIS_REPLY_ERROR) {
-        // Some errors might indicate a non-existent key, but JSON.TYPE should return NIL for that.
-        // So, any error here is likely a syntax issue or server problem.
-        std::string error_msg = (reply->str ? reply->str : "Redis error reply with no message");
-        // Check if the error message indicates the key itself does not exist, which some Redis versions might do for JSON commands
-        // e.g. "ERR new objects must be created at the root" - this is not for TYPE but as an example of error string.
-        // For JSON.TYPE, if the key does not exist, it should return REDIS_REPLY_NIL for the path.
-        // If the path does not exist under an existing key, it also returns REDIS_REPLY_NIL.
-        _connection_manager->return_connection(std::move(conn));
-        throw RedisCommandException("JSON.TYPE", "Key: " + key + ", Path: " + path + ", Error: " + error_msg);
+    try {
+        json result = _lua_script_manager->execute_script("json_path_type", keys, args);
+        // Lua script for type/exists should return the type string if exists, or null/nil if not.
+        // If result is json(nullptr), path does not exist.
+        // Otherwise, if it's a non-null value (typically a string representing the type), it exists.
+        return !result.is_null();
+    } catch (const LuaScriptException& e) {
+        // If script throws error for "key not found" before even checking path, that's a LuaScriptException.
+        // For exists_path, this should probably return false, not throw.
+        // This requires the Lua script to handle "key not found" gracefully and return nil/null.
+        // If any other Lua error, then it's a proper exception.
+        // For now, rethrow, but this might need refinement based on Lua script behavior.
+        // A robust Lua script for "type" would return nil if key doesn't exist, or path doesn't exist.
+        // In such cases, LuaScriptManager would give json(nullptr), and `!result.is_null()` would be false.
+        // So, a LuaScriptException here implies a more severe script error.
+        throw RedisCommandException("LUA_json_path_type", "Key: " + key + ", Path: " + path + ", Error: " + e.what());
+    } catch (const RedisJSONException& e) {
+        throw;
     }
-
-    // JSON.TYPE returns NIL if the key or path does not exist.
-    if (reply->type == REDIS_REPLY_NIL) {
-        _connection_manager->return_connection(std::move(conn));
-        return false; // Key or path does not exist
-    }
-
-    // If it's not NIL and not an ERROR, it means the path exists and has a type.
-    // The reply will be a string representing the type (e.g., "object", "array", "string").
-    // We don't need to check the specific type, just that we got a type string.
-    if (reply->type == REDIS_REPLY_STRING) {
-        _connection_manager->return_connection(std::move(conn));
-        return true; // Path exists
-    }
-    
-    // Any other reply type is unexpected for JSON.TYPE
-    _connection_manager->return_connection(std::move(conn));
-    throw RedisCommandException("JSON.TYPE", "Key: " + key + ", Path: " + path + ", Error: Unexpected reply type from Redis: " + std::to_string(reply->type));
 }
 
 // --- Array Operations ---
 
 void RedisJSONClient::append_path(const std::string& key, const std::string& path,
                                   const json& value) {
-    std::unique_ptr<RedisConnection> conn = get_redis_connection();
+    if (!_lua_script_manager) {
+        throw RedisJSONException("LuaScriptManager is not initialized for append_path.");
+    }
     std::string value_str = value.dump();
+    std::vector<std::string> keys = {key};
+    std::vector<std::string> args = {path, value_str};
 
-    RedisReplyPtr reply(static_cast<redisReply*>(
-        conn->command("JSON.ARRAPPEND %s %s %s", key.c_str(), path.c_str(), value_str.c_str())
-    ));
-
-    if (!reply) {
-        _connection_manager->return_connection(std::move(conn));
-        throw RedisCommandException("JSON.ARRAPPEND", "Key: " + key + ", Path: " + path + ", Error: No reply or connection error");
-    }
-
-    if (reply->type == REDIS_REPLY_ERROR) {
-        _connection_manager->return_connection(std::move(conn));
-        throw RedisCommandException("JSON.ARRAPPEND", "Key: " + key + ", Path: " + path + ", Error: " + (reply->str ? reply->str : "Redis error reply with no message"));
-    }
-
-    // JSON.ARRAPPEND returns an array of integers, where each integer is the new length of the array after appending a value.
-    // If a single path is specified and a single value is appended, it returns an array with one integer (the new length),
-    // or NIL if the path is not an array or the key does not exist.
-    // Example: `JSON.ARRAPPEND mykey .arr 1 2` returns `[3,4]` if .arr was `[0]`
-    // If just `JSON.ARRAPPEND mykey .arr 1`, returns `[2]` if .arr was `[0]`
-    // If path is not an array, or key does not exist, returns `[nil]` (array of nils in hiredis?) or just `NIL`
-    // The command `JSON.ARRAPPEND <key> <path> <json> [json ...]`
-    // Hiredis reply for `[integer]` would be an array reply with one element of type integer.
-    // Hiredis reply for `[nil]` would be an array reply with one element of type nil.
-    // Hiredis reply for `NIL` (e.g. key not found) would be a REDIS_REPLY_NIL.
-
-    if (reply->type == REDIS_REPLY_NIL) {
-        // This means the key does not exist, or the path before the last segment does not exist.
-        _connection_manager->return_connection(std::move(conn));
-        // This could be an error or interpreted as "operation had no effect".
-        // Throwing an exception seems appropriate if the expectation is that the path should exist.
-        throw PathNotFoundException(key, path); // Custom message ("Key or path does not exist, or path is not an array, for JSON.ARRAPPEND") omitted
-    }
-    
-    if (reply->type == REDIS_REPLY_ARRAY) {
-        // Expecting an array with one element, which is an integer (new length) or nil (path is not an array type).
-        if (reply->elements == 1) {
-            redisReply* element_reply = reply->element[0];
-            if (element_reply->type == REDIS_REPLY_INTEGER) {
-                // Success, new length is element_reply->integer. We don't do anything with it for a void function.
-                _connection_manager->return_connection(std::move(conn));
-                return;
-            } else if (element_reply->type == REDIS_REPLY_NIL) {
-                // This means the path exists but is not an array.
-                _connection_manager->return_connection(std::move(conn));
-                throw RedisCommandException("JSON.ARRAPPEND", "Key: " + key + ", Path: " + path + " exists but is not an array.");
-            }
+    try {
+        json result = _lua_script_manager->execute_script("json_array_append", keys, args);
+        // Lua script should return the new array length or confirm success.
+        // If it returns an integer (new length), we don't use it in void function.
+        // If it throws an error (e.g. path not an array), it's caught as LuaScriptException.
+        if (result.is_number_integer() || result.is_boolean() && result.get<bool>()) { // Assuming script returns new length or true
+            return;
         }
-    }
+         // Handle cases where script might return specific error codes as non-exception results
+        if (result.is_string() && result.get<std::string>() == "ERR_NOT_ARRAY") {
+            throw TypeMismatchException(key, path, "Path is not an array for append operation.");
+        }
+        if (result.is_null()){ // Could mean key or path not found
+            throw PathNotFoundException(key,path);
+        }
+        // Fallback for unexpected success indication
+        // throw RedisCommandException("LUA_json_array_append", "Key: " + key + ", Path: " + path + ", Unexpected success result: " + result.dump());
 
-    _connection_manager->return_connection(std::move(conn));
-    // Fallback for unexpected reply structures.
-    // Construct a more informative message if possible.
-    std::string reply_details = "Unexpected reply type: " + std::to_string(reply->type);
-    if (reply->type == REDIS_REPLY_STRING) {
-        reply_details += ", Value: " + std::string(reply->str);
-    } else if (reply->type == REDIS_REPLY_ARRAY) {
-        reply_details += ", Elements: " + std::to_string(reply->elements);
-         if (reply->elements > 0 && reply->element[0]) {
-            reply_details += ", First element type: " + std::to_string(reply->element[0]->type);
-         }
+
+    } catch (const LuaScriptException& e) {
+        throw RedisCommandException("LUA_json_array_append", "Key: " + key + ", Path: " + path + ", Error: " + e.what());
+    } catch (const RedisJSONException& e) {
+        throw;
     }
-    throw RedisCommandException("JSON.ARRAPPEND", "Key: " + key + ", Path: " + path + ", Error: " + reply_details);
 }
 
 void RedisJSONClient::prepend_path(const std::string& key, const std::string& path,
                                    const json& value) {
-    std::unique_ptr<RedisConnection> conn = get_redis_connection();
+    if (!_lua_script_manager) {
+        throw RedisJSONException("LuaScriptManager is not initialized for prepend_path.");
+    }
     std::string value_str = value.dump();
+    std::vector<std::string> keys = {key};
+    std::vector<std::string> args = {path, value_str};
 
-    // JSON.ARRINSERT <key> <path> <index> <json> [json ...]
-    // We are prepending, so index is 0.
-    RedisReplyPtr reply(static_cast<redisReply*>(
-        conn->command("JSON.ARRINSERT %s %s 0 %s", key.c_str(), path.c_str(), value_str.c_str())
-    ));
-
-    if (!reply) {
-        _connection_manager->return_connection(std::move(conn));
-        throw RedisCommandException("JSON.ARRINSERT", "Key: " + key + ", Path: " + path + ", Index: 0, Error: No reply or connection error");
-    }
-
-    if (reply->type == REDIS_REPLY_ERROR) {
-        _connection_manager->return_connection(std::move(conn));
-        throw RedisCommandException("JSON.ARRINSERT", "Key: " + key + ", Path: " + path + ", Index: 0, Error: " + (reply->str ? reply->str : "Redis error reply with no message"));
-    }
-
-    // JSON.ARRINSERT returns an array of integers, similar to JSON.ARRAPPEND.
-    // Each integer is the new length of the array after inserting a value.
-    // If a single path and single value, returns an array with one integer (new length) or NIL if path is not an array.
-    // If key does not exist, or path before last segment does not exist, returns REDIS_REPLY_NIL.
-
-    if (reply->type == REDIS_REPLY_NIL) {
-        _connection_manager->return_connection(std::move(conn));
-        throw PathNotFoundException(key, path); // Custom message ("Key or path does not exist for JSON.ARRINSERT") omitted
-    }
-
-    if (reply->type == REDIS_REPLY_ARRAY) {
-        if (reply->elements == 1) {
-            redisReply* element_reply = reply->element[0];
-            if (element_reply->type == REDIS_REPLY_INTEGER) {
-                // Success, new length is element_reply->integer.
-                _connection_manager->return_connection(std::move(conn));
-                return;
-            } else if (element_reply->type == REDIS_REPLY_NIL) {
-                // Path exists but is not an array.
-                _connection_manager->return_connection(std::move(conn));
-                throw RedisCommandException("JSON.ARRINSERT", "Key: " + key + ", Path: " + path + " exists but is not an array.");
-            }
+    try {
+        json result = _lua_script_manager->execute_script("json_array_prepend", keys, args);
+        // Similar to append, expect success confirmation or new length.
+        if (result.is_number_integer() || result.is_boolean() && result.get<bool>()) {
+            return;
         }
+        if (result.is_string() && result.get<std::string>() == "ERR_NOT_ARRAY") {
+            throw TypeMismatchException(key, path, "Path is not an array for prepend operation.");
+        }
+         if (result.is_null()){
+            throw PathNotFoundException(key,path);
+        }
+        // throw RedisCommandException("LUA_json_array_prepend", "Key: " + key + ", Path: " + path + ", Unexpected success result: " + result.dump());
+
+    } catch (const LuaScriptException& e) {
+        throw RedisCommandException("LUA_json_array_prepend", "Key: " + key + ", Path: " + path + ", Error: " + e.what());
+    } catch (const RedisJSONException& e) {
+        throw;
     }
-    
-    _connection_manager->return_connection(std::move(conn));
-    std::string reply_details = "Unexpected reply type: " + std::to_string(reply->type);
-    if (reply->type == REDIS_REPLY_STRING) {
-        reply_details += ", Value: " + std::string(reply->str);
-    } else if (reply->type == REDIS_REPLY_ARRAY) {
-        reply_details += ", Elements: " + std::to_string(reply->elements);
-         if (reply->elements > 0 && reply->element[0]) {
-            reply_details += ", First element type: " + std::to_string(reply->element[0]->type);
-         }
-    }
-    throw RedisCommandException("JSON.ARRINSERT", "Key: " + key + ", Path: " + path + ", Index: 0, Error: " + reply_details);
 }
 
 json RedisJSONClient::pop_path(const std::string& key, const std::string& path,
                                int index) {
-    std::unique_ptr<RedisConnection> conn = get_redis_connection();
-
-    // JSON.ARRPOP <key> [path [index]]
-    // If path is not provided, pops from root array. If index not provided, pops last element.
-    RedisReplyPtr reply(static_cast<redisReply*>(
-        conn->command("JSON.ARRPOP %s %s %d", key.c_str(), path.c_str(), index)
-    ));
-
-    if (!reply) {
-        _connection_manager->return_connection(std::move(conn));
-        throw RedisCommandException("JSON.ARRPOP", "Key: " + key + ", Path: " + path + ", Index: " + std::to_string(index) + ", Error: No reply or connection error");
+    if (!_lua_script_manager) {
+        throw RedisJSONException("LuaScriptManager is not initialized for pop_path.");
     }
+    std::vector<std::string> keys = {key};
+    std::vector<std::string> args = {path, std::to_string(index)};
 
-    if (reply->type == REDIS_REPLY_ERROR) {
-        _connection_manager->return_connection(std::move(conn));
-        throw RedisCommandException("JSON.ARRPOP", "Key: " + key + ", Path: " + path + ", Index: " + std::to_string(index) + ", Error: " + (reply->str ? reply->str : "Redis error reply with no message"));
-    }
-
-    // JSON.ARRPOP returns the popped JSON value as a bulk string.
-    // Returns NIL if key does not exist, path is not an array, or index is out of bounds.
-    if (reply->type == REDIS_REPLY_NIL) {
-        _connection_manager->return_connection(std::move(conn));
-        // This could be due to various reasons: key not found, path not an array, index out of bounds.
-        // Throwing PathNotFoundException might be misleading if the path exists but is not an array, or index is bad.
-        // A more generic exception or a specific one for "pop failed" might be better.
-        // For now, let's use a generic command exception indicating the condition.
-        throw RedisCommandException("JSON.ARRPOP", "Key: " + key + ", Path: " + path + ", Index: " + std::to_string(index) + ". Failed to pop: key/path not found, path not array, or index out of bounds.");
-    }
-
-    if (reply->type == REDIS_REPLY_STRING) {
-        std::string result_str = reply->str;
-        _connection_manager->return_connection(std::move(conn));
-        try {
-            return _parse_json_reply(result_str, "JSON.ARRPOP for key '" + key + "', path '" + path + "', index " + std::to_string(index));
-        } catch (const JsonParsingException& e) {
-            throw; // Rethrow if it's already a JsonParsingException
-        } catch (const json::parse_error& e) {
-            throw JsonParsingException("Failed to parse JSON.ARRPOP response for key '" + key + "', path '" + path + "', index " + std::to_string(index) + ": " + e.what() + ". Received: " + result_str);
+    try {
+        json result = _lua_script_manager->execute_script("json_array_pop", keys, args);
+        // Lua script should return the popped value (as JSON string, parsed by LuaScriptManager)
+        // or null/nil if path not found, not an array, or index out of bounds.
+        if (result.is_null()) {
+             // Distinguish between "path not found/not array" and "index out of bounds but array exists"
+             // For now, PathNotFoundException covers these broadly. A more specific error could be used.
+            throw PathNotFoundException(key, path); // Or specific "PopFailedException"
         }
+        return result;
+    } catch (const LuaScriptException& e) {
+         // Lua script might throw specific errors for "out of bounds" vs "not an array"
+        throw RedisCommandException("LUA_json_array_pop", "Key: " + key + ", Path: " + path + ", Index: " + std::to_string(index) + ", Error: " + e.what());
+    } catch (const RedisJSONException& e) {
+        throw;
     }
-
-    _connection_manager->return_connection(std::move(conn));
-    throw RedisCommandException("JSON.ARRPOP", "Key: " + key + ", Path: " + path + ", Index: " + std::to_string(index) + ", Error: Unexpected reply type from Redis: " + std::to_string(reply->type));
 }
 
 size_t RedisJSONClient::array_length(const std::string& key, const std::string& path) const {
-    std::unique_ptr<RedisConnection> conn = get_redis_connection();
-
-    RedisReplyPtr reply(static_cast<redisReply*>(
-        conn->command("JSON.ARRLEN %s %s", key.c_str(), path.c_str())
-    ));
-
-    if (!reply) {
-        _connection_manager->return_connection(std::move(conn));
-        throw RedisCommandException("JSON.ARRLEN", "Key: " + key + ", Path: " + path + ", Error: No reply or connection error");
+    if (!_lua_script_manager) {
+        throw RedisJSONException("LuaScriptManager is not initialized for array_length.");
     }
+    std::vector<std::string> keys = {key};
+    std::vector<std::string> args = {path};
 
-    if (reply->type == REDIS_REPLY_ERROR) {
-        _connection_manager->return_connection(std::move(conn));
-        throw RedisCommandException("JSON.ARRLEN", "Key: " + key + ", Path: " + path + ", Error: " + (reply->str ? reply->str : "Redis error reply with no message"));
-    }
-
-    // JSON.ARRLEN returns an integer reply: the length of the array at path.
-    // If the key does not exist, or path does not exist, or path is not an array, it returns NIL.
-    // Some versions/docs say it returns an array of integers (lengths). For a single path, it should be a single integer or nil.
-    // Let's assume the common case for a single path: either an Integer or Nil.
-    // If it returns an array with one integer, we should handle that too.
-
-    if (reply->type == REDIS_REPLY_NIL) {
-        _connection_manager->return_connection(std::move(conn));
-        // PathNotFoundException or a more specific "not an array" or "length cannot be determined"
-        // Throwing PathNotFound is reasonable if the path doesn't lead to an array whose length can be determined.
-        throw PathNotFoundException(key, path); // Custom message ("Key or path does not exist, or path is not an array, for JSON.ARRLEN") omitted
-    }
-
-    if (reply->type == REDIS_REPLY_INTEGER) {
-        long long length = reply->integer;
-        _connection_manager->return_connection(std::move(conn));
-        if (length < 0) { // Should not happen for ARRLEN, but good check
-            throw RedisCommandException("JSON.ARRLEN", "Key: " + key + ", Path: " + path + ", Error: Received negative array length.");
-        }
-        return static_cast<size_t>(length);
-    }
-    
-    // Handle case where it might return an array with one element (the length or nil)
-    // This is how ReJSON 2.0+ handles it for single path.
-    if (reply->type == REDIS_REPLY_ARRAY && reply->elements == 1) {
-        redisReply* element_reply = reply->element[0];
-        if (element_reply->type == REDIS_REPLY_INTEGER) {
-            long long length = element_reply->integer;
-            _connection_manager->return_connection(std::move(conn));
-            if (length < 0) {
-                 throw RedisCommandException("JSON.ARRLEN", "Key: " + key + ", Path: " + path + ", Error: Received negative array length in array reply.");
+    try {
+        json result = _lua_script_manager->execute_script("json_array_length", keys, args);
+        // Lua script should return the array length as an integer, or null/nil if path not found/not array.
+        if (result.is_number_integer()) {
+            long long length = result.get<long long>();
+            if (length < 0) { // Should not happen for a valid length
+                throw RedisCommandException("LUA_json_array_length", "Key: " + key + ", Path: " + path + ", Received negative array length.");
             }
             return static_cast<size_t>(length);
-        } else if (element_reply->type == REDIS_REPLY_NIL) {
-            // Path specified, but it's not an array (or doesn't exist at that specific sub-path)
-             _connection_manager->return_connection(std::move(conn));
-            throw PathNotFoundException(key, path); // Custom message ("Path exists but is not an array, or sub-path not found, for JSON.ARRLEN (array reply)") omitted
         }
+        if (result.is_null()) { // Path not found or not an array
+            throw PathNotFoundException(key, path); // Or TypeMismatchException if path exists but not array
+        }
+        // Fallback for unexpected result type
+        throw RedisCommandException("LUA_json_array_length", "Key: " + key + ", Path: " + path + ", Unexpected result type: " + result.dump());
+    } catch (const LuaScriptException& e) {
+        throw RedisCommandException("LUA_json_array_length", "Key: " + key + ", Path: " + path + ", Error: " + e.what());
+    } catch (const RedisJSONException& e) {
+        throw;
     }
-
-
-    _connection_manager->return_connection(std::move(conn));
-    throw RedisCommandException("JSON.ARRLEN", "Key: " + key + ", Path: " + path + ", Error: Unexpected reply type from Redis: " + std::to_string(reply->type));
 }
 
 // --- Merge Operations ---
