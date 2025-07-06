@@ -159,7 +159,11 @@ const std::string LuaScriptManager::JSON_PATH_GET_LUA = LUA_COMMON_HELPERS + R"l
     local path_segments = parse_path(path_str)
     if path_segments == nil then return redis.error_reply('ERR_PATH Invalid path string: ' .. path_str) end
     local value_at_path = get_value_at_path(current_doc, path_segments)
-    return cjson.encode(value_at_path) -- cjson.encode(nil) is "null"
+    if value_at_path == nil then
+        return "[]" -- Return empty array string literal for path not found
+    else
+        return cjson.encode({value_at_path}) -- Wrap found value in an array
+    end
 )lua";
 
 const std::string LuaScriptManager::JSON_PATH_SET_LUA = LUA_COMMON_HELPERS + R"lua(
@@ -555,8 +559,8 @@ const std::map<std::string, const std::string*> LuaScriptManager::SCRIPT_DEFINIT
     {"json_array_prepend", &LuaScriptManager::JSON_ARRAY_PREPEND_LUA},
     {"json_array_pop", &LuaScriptManager::JSON_ARRAY_POP_LUA},
     {"json_array_length", &LuaScriptManager::JSON_ARRAY_LENGTH_LUA},
-    {"atomic_json_get_set_path", &LuaScriptManager::ATOMIC_JSON_GET_SET_PATH_LUA},
-    {"atomic_json_compare_set_path", &LuaScriptManager::ATOMIC_JSON_COMPARE_SET_PATH_LUA}
+    {"json_get_set", &LuaScriptManager::ATOMIC_JSON_GET_SET_PATH_LUA}, // Renamed from atomic_json_get_set_path
+    {"json_compare_set", &LuaScriptManager::ATOMIC_JSON_COMPARE_SET_PATH_LUA} // Renamed from atomic_json_compare_set_path
     // Add any other scripts here if they are defined as static const std::string members
 };
 

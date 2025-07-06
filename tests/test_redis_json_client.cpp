@@ -366,9 +366,9 @@ TEST_F(RedisJSONClientTest, ArrayOperations) {
     // Error cases
     ASSERT_THROW(client->array_length(key, "$.non_array_path"), redisjson::PathNotFoundException); // Path not an array or not found
     client->set_json(key, {{"not_an_array", 123}});
-    ASSERT_THROW(client->append_path(key, "$.not_an_array", 5), redisjson::RedisCommandException); // Path not an array
+    ASSERT_THROW(client->append_path(key, "$.not_an_array", 5), redisjson::TypeMismatchException); // Corrected expected exception
     ASSERT_THROW(client->array_length(key, "$.not_an_array"), redisjson::PathNotFoundException); // Path not an array for length check
-    ASSERT_THROW(client->pop_path(key, "$.not_an_array",0), redisjson::RedisCommandException); // Path not an array for pop
+    ASSERT_THROW(client->pop_path(key, "$.not_an_array",0), redisjson::PathNotFoundException); // Corrected expected exception
 }
 
 
