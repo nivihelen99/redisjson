@@ -114,7 +114,8 @@ public:
                 // or the manager is shutting down), this temporary unique_ptr will
                 // simply delete conn_ptr when it goes out of scope at the end of the
                 // return_connection call. It prevents re-queuing or double-management.
-                manager_ptr_->return_connection(RedisConnectionPtr(conn_ptr, RedisConnectionDeleter(nullptr)));
+                // Passing manager_ptr_ ensures the repooled connection retains a valid deleter.
+                manager_ptr_->return_connection(RedisConnectionPtr(conn_ptr, RedisConnectionDeleter(manager_ptr_)));
             } else if (conn_ptr) {
                 // If there's no manager_ptr_, or if this is the deleter for the temporary
                 // RedisConnectionPtr created above and return_connection decided not to keep it,
