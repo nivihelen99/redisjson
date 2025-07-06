@@ -15,44 +15,16 @@ add_library(redisjson++ ${LIB_SOURCES})
 target_include_directories(redisjson++ PUBLIC include)
 
 # Required dependencies
-# Assuming nlohmann_json is header-only and included via target_include_directories
 # For hiredis, you'd typically find_package and link.
-# Using FetchContent for both for self-contained example, if system packages are not assumed.
+# Using FetchContent for hiredis for self-contained example, if system packages are not assumed.
 
 include(FetchContent)
 
-# nlohmann_json (header only, but FetchContent can still be used to get it)
-FetchContent_Declare(
-  nlohmann_json
-  GIT_REPOSITORY https://github.com/nlohmann/json.git
-  GIT_TAG v3.11.3 # Or any recent stable version
-)
-FetchContent_MakeAvailable(nlohmann_json)
-# For header-only, often just adding its include dir is enough if it's in a known path
-# If nlohmann_json provides a target, use it. Otherwise, target_include_directories.
-# Assuming nlohmann_json source dir is added to include path by FetchContent_MakeAvailable
-# or it creates a target like nlohmann_json::nlohmann_json.
-# For nlohmann_json, it's often used as just #include <nlohmann/json.hpp>
-# target_include_directories(redisjson++ PRIVATE ${nlohmann_json_SOURCE_DIR}/include)
-# If it exports a target:
-# target_link_libraries(redisjson++ PRIVATE nlohmann_json::nlohmann_json) # if available
-# For simplicity, ensure nlohmann/json.hpp is findable. Often put in 'vendor' or system include.
-# For this example, we'll assume it's available in the include path for the library.
-# The target_include_directories for redisjson++ itself should make its own headers available.
-# If nlohmann_json is fetched, its include directory needs to be added to redisjson++
-if(nlohmann_json_SOURCE_DIR)
-    target_include_directories(redisjson++ PUBLIC ${nlohmann_json_SOURCE_DIR}/single_include) # For single header version
-    target_include_directories(redisjson++ INTERFACE ${nlohmann_json_SOURCE_DIR}/single_include) # For consumers of redisjson++
-else()
-    # Fallback if FetchContent didn't define it, try find_package
-    find_package(nlohmann_json 3.11.0) # QUIETLY?
-    if(TARGET nlohmann_json::nlohmann_json)
-        target_link_libraries(redisjson++ PRIVATE nlohmann_json::nlohmann_json)
-    else()
-        # Manual include or error
-        message(WARNING "nlohmann_json not found via FetchContent or find_package. Ensure it's in include path.")
-    endif()
-endif()
+# nlohmann_json is now vendored in thirdparty/
+# Add thirdparty to include directories for redisjson++ target
+target_include_directories(redisjson++ PUBLIC thirdparty)
+# For consumers of redisjson++, if they need to see nlohmann/json.hpp via redisjson++'s headers:
+target_include_directories(redisjson++ INTERFACE thirdparty)
 
 
 # hiredis
