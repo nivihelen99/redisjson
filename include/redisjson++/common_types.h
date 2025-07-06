@@ -20,7 +20,7 @@ struct ClientConfig {
     int port = 6379;
     std::string password; // Empty if no password
     int database = 0;     // Default Redis database
-    std::chrono::milliseconds timeout = std::chrono::milliseconds(500); // Connection and command timeout
+    std::chrono::milliseconds timeout = std::chrono::milliseconds(5000); // Connection and command timeout
 
     // Connection pool settings
     int connection_pool_size = 5; // Max total connections in the pool
