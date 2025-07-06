@@ -8,12 +8,14 @@
 #include <nlohmann/json.hpp>
 #include <optional> // For std::optional
 
+#include <hiredis/hiredis.h> // For redisReply and redisContext
+
 #include "common_types.h"
 #include "exceptions.h"
-// #include "redis_connection_manager.h" // To be replaced
+#include "redis_connection_manager.h" // To be replaced
 #include "path_parser.h"
 #include "json_modifier.h"
-// #include "lua_script_manager.h" // To be removed or heavily adapted
+#include "lua_script_manager.h" // To be removed or heavily adapted
 // #include "transaction_manager.h" // May be removed if SWSS doesn't support easily
 #include "json_query_engine.h"   // May be adapted or removed
 #include "json_cache.h"          // May be adapted or removed
@@ -164,7 +166,5 @@ private:
     // RedisReplyPtr _execute_redis_command(const char* format, ...);
     // RedisReplyPtr _execute_redis_command_argv(int argc, const char **argv, const size_t *argvlen);
 };
-
-} // namespace redisjson
 
 } // namespace redisjson
