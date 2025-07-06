@@ -199,6 +199,67 @@ void run_array_operations(redisjson::RedisJSONClient& client) {
     client.del_json(list_key);
 }
 
+void run_array_operations_extended(redisjson::RedisJSONClient& client) {
+    print_header("Array Operations (Extended)");
+    std::string list_key = "sample:array:ext_items";
+    json initial_data = {
+        {"description", "A list of numbers"},
+        {"values", {10, 20, 30, 40, 50}}
+    };
+    client.set_json(list_key, initial_data);
+    std::cout << "Setup: Initial array for extended operations '" << list_key << "':\n" << initial_data.dump(2) << std::endl;
+
+    // 1. Iterate through array elements
+    try {
+        std::cout << "\nIterating through 'values' array:" << std::endl;
+        json current_array = client.get_path(list_key, "values");
+        if (current_array.is_array()) {
+            for (const auto& item : current_array) {
+                std::cout << "- Item: " << item.dump() << std::endl;
+            }
+        } else {
+            std::cout << "ERROR: 'values' is not an array." << std::endl;
+        }
+    } catch (const redisjson::RedisJSONException& e) {
+        std::cerr << "ERROR: Iterating array: " << e.what() << std::endl;
+    }
+
+    // 2. Get element at a particular index
+    try {
+        std::cout << "\nGetting element at index 2 of 'values':" << std::endl;
+        json element = client.get_path(list_key, "values[2]"); // Get the third element
+        std::cout << "SUCCESS: Element at index 2: " << element.dump() << std::endl;
+    } catch (const redisjson::RedisJSONException& e) {
+        std::cerr << "ERROR: Getting element at index: " << e.what() << std::endl;
+    }
+
+    // 3. Remove an element from a particular index
+    try {
+        std::cout << "\nRemoving element at index 1 from 'values':" << std::endl;
+        // Current array: [10, 20, 30, 40, 50]
+        // Element at index 1 is 20
+        json removed_element = client.pop_path(list_key, "values", 1);
+        std::cout << "SUCCESS: Removed element: " << removed_element.dump() << std::endl;
+        json current_doc = client.get_json(list_key);
+        std::cout << "Document after removing element at index 1:\n" << current_doc.dump(2) << std::endl;
+        // Expected array: [10, 30, 40, 50]
+    } catch (const redisjson::RedisJSONException& e) {
+        std::cerr << "ERROR: Removing element at index: " << e.what() << std::endl;
+    }
+     // 4. Get array length (verify after removal)
+    try {
+        size_t len = client.array_length(list_key, "values");
+        std::cout << "\nSUCCESS: Array length of 'values' after removal: " << len << std::endl;
+    } catch (const redisjson::RedisJSONException& e) {
+        std::cerr << "ERROR: Array length: " << e.what() << std::endl;
+    }
+
+
+    // Cleanup
+    client.del_json(list_key);
+}
+
+
 void run_atomic_operations(redisjson::RedisJSONClient& client) {
     print_header("Atomic Operations (Conceptual - Requires Lua Scripts)");
     std::string atomic_key = "sample:atomic:counter";
@@ -272,6 +333,7 @@ int main() {
         run_document_operations(legacy_client);
         run_path_operations(legacy_client);
         run_array_operations(legacy_client);
+        run_array_operations_extended(legacy_client); // Added extended array operations
         run_atomic_operations(legacy_client); // Original atomic operations using Lua
 
         print_header("Non-SWSS (Legacy) Mode Sample Program Finished");
