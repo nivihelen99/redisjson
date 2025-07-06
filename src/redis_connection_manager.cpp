@@ -54,9 +54,9 @@ RedisConnection& RedisConnection::operator=(RedisConnection&& other) noexcept {
 
 bool RedisConnection::connect() {
     // LOGGING: Entering connect()
-    std::cout << "LOG: RedisConnection::connect() for " << host_ << ":" << port_ << " - Entry." << std::endl;
+    // std::cout << "LOG: RedisConnection::connect() for " << host_ << ":" << port_ << " - Entry." << std::endl;
     if (connected_) {
-        std::cout << "LOG: RedisConnection::connect() for " << host_ << ":" << port_ << " - Already connected." << std::endl;
+        // std::cout << "LOG: RedisConnection::connect() for " << host_ << ":" << port_ << " - Already connected." << std::endl;
         return true;
     }
     last_error_message_.clear();
@@ -65,18 +65,18 @@ bool RedisConnection::connect() {
     tv_timeout.tv_sec = connect_timeout_ms_.count() / 1000;
     tv_timeout.tv_usec = (connect_timeout_ms_.count() % 1000) * 1000;
     // LOGGING: Before redisConnectWithTimeout
-    std::cout << "LOG: RedisConnection::connect() for " << host_ << ":" << port_
-              << " - Calling redisConnectWithTimeout (timeout: " << tv_timeout.tv_sec << "s "
-              << tv_timeout.tv_usec << "us)." << std::endl;
+    // std::cout << "LOG: RedisConnection::connect() for " << host_ << ":" << port_
+    //           << " - Calling redisConnectWithTimeout (timeout: " << tv_timeout.tv_sec << "s "
+    //           << tv_timeout.tv_usec << "us)." << std::endl;
 
     context_ = redisConnectWithTimeout(host_.c_str(), port_, tv_timeout);
 
     // LOGGING: After redisConnectWithTimeout
     if (context_ == nullptr || context_->err) {
-        std::cout << "LOG: RedisConnection::connect() for " << host_ << ":" << port_
-                  << " - redisConnectWithTimeout failed. Context is " << (context_ ? "not null" : "null")
-                  << (context_ && context_->err ? ", context error: " + std::string(context_->errstr ? context_->errstr : "Unknown error") + " (code: " + std::to_string(context_->err) + ")" : "")
-                  << std::endl;
+        // std::cout << "LOG: RedisConnection::connect() for " << host_ << ":" << port_
+        //           << " - redisConnectWithTimeout failed. Context is " << (context_ ? "not null" : "null")
+        //           << (context_ && context_->err ? ", context error: " + std::string(context_->errstr ? context_->errstr : "Unknown error") + " (code: " + std::to_string(context_->err) + ")" : "")
+        //           << std::endl;
         if (context_) {
             last_error_message_ = "hiredis context error (redisConnectWithTimeout): " + std::string(context_->errstr ? context_->errstr : "Unknown error") + " (code: " + std::to_string(context_->err) + ")";
             redisFree(context_);
@@ -87,17 +87,17 @@ bool RedisConnection::connect() {
         connected_ = false;
         return false;
     }
-    std::cout << "LOG: RedisConnection::connect() for " << host_ << ":" << port_ << " - redisConnectWithTimeout succeeded." << std::endl;
+    // std::cout << "LOG: RedisConnection::connect() for " << host_ << ":" << port_ << " - redisConnectWithTimeout succeeded." << std::endl;
 
     // LOGGING: Before redisSetTimeout
-    std::cout << "LOG: RedisConnection::connect() for " << host_ << ":" << port_
-              << " - Calling redisSetTimeout (timeout: " << tv_timeout.tv_sec << "s "
-              << tv_timeout.tv_usec << "us)." << std::endl;
+    // std::cout << "LOG: RedisConnection::connect() for " << host_ << ":" << port_
+    //           << " - Calling redisSetTimeout (timeout: " << tv_timeout.tv_sec << "s "
+    //           << tv_timeout.tv_usec << "us)." << std::endl;
     if (redisSetTimeout(context_, tv_timeout) != REDIS_OK) {
-        std::cout << "LOG: RedisConnection::connect() for " << host_ << ":" << port_
-                  << " - redisSetTimeout failed: "
-                  << (context_->errstr ? std::string(context_->errstr) : "Unknown error")
-                  << " (code: " << std::to_string(context_->err) << ")" << std::endl;
+        // std::cout << "LOG: RedisConnection::connect() for " << host_ << ":" << port_
+        //           << " - redisSetTimeout failed: "
+        //           << (context_->errstr ? std::string(context_->errstr) : "Unknown error")
+        //           << " (code: " << std::to_string(context_->err) << ")" << std::endl;
         if (context_->errstr) {
             last_error_message_ = "redisSetTimeout failed: " + std::string(context_->errstr) + " (code: " + std::to_string(context_->err) + ")";
         } else {
@@ -108,12 +108,12 @@ bool RedisConnection::connect() {
         connected_ = false;
         return false;
     }
-    std::cout << "LOG: RedisConnection::connect() for " << host_ << ":" << port_ << " - redisSetTimeout succeeded." << std::endl;
+    // std::cout << "LOG: RedisConnection::connect() for " << host_ << ":" << port_ << " - redisSetTimeout succeeded." << std::endl;
 
     if (!authenticate()) {
        if (last_error_message_.empty()) last_error_message_ = "Authentication failed";
         // LOGGING: Authentication failed
-        std::cout << "LOG: RedisConnection::connect() for " << host_ << ":" << port_ << " - Authentication failed. Error: " << last_error_message_ << std::endl;
+        // std::cout << "LOG: RedisConnection::connect() for " << host_ << ":" << port_ << " - Authentication failed. Error: " << last_error_message_ << std::endl;
         redisFree(context_);
         context_ = nullptr;
         connected_ = false;
@@ -124,7 +124,7 @@ bool RedisConnection::connect() {
     if (!select_database()) {
        if (last_error_message_.empty()) last_error_message_ = "Database selection failed";
         // LOGGING: Database selection failed
-        std::cout << "LOG: RedisConnection::connect() for " << host_ << ":" << port_ << " - Database selection failed. Error: " << last_error_message_ << std::endl;
+        // std::cout << "LOG: RedisConnection::connect() for " << host_ << ":" << port_ << " - Database selection failed. Error: " << last_error_message_ << std::endl;
         redisFree(context_);
         context_ = nullptr;
         connected_ = false;
@@ -132,7 +132,7 @@ bool RedisConnection::connect() {
     }
     // LOGGING: Database selection succeeded (or not needed) is logged within select_database()
 
-    std::cout << "LOG: RedisConnection::connect() for " << host_ << ":" << port_ << " - Connection fully established." << std::endl;
+    // std::cout << "LOG: RedisConnection::connect() for " << host_ << ":" << port_ << " - Connection fully established." << std::endl;
     connected_ = true;
     last_used_time = std::chrono::steady_clock::now();
     return true;
@@ -158,18 +158,18 @@ bool RedisConnection::authenticate() {
     // LOGGING: Entering authenticate()
     // std::cout << "LOG: RedisConnection::authenticate() for " << host_ << ":" << port_ << " - Entry." << std::endl;
     if (password_.empty()) {
-        std::cout << "LOG: RedisConnection::authenticate() for " << host_ << ":" << port_ << " - No password provided, skipping AUTH." << std::endl;
+        // std::cout << "LOG: RedisConnection::authenticate() for " << host_ << ":" << port_ << " - No password provided, skipping AUTH." << std::endl;
         return true;
     }
-    std::cout << "LOG: RedisConnection::authenticate() for " << host_ << ":" << port_ << " - Calling redisCommand for AUTH." << std::endl;
+    // std::cout << "LOG: RedisConnection::authenticate() for " << host_ << ":" << port_ << " - Calling redisCommand for AUTH." << std::endl;
     redisReply* reply = static_cast<redisReply*>(redisCommand(context_, "AUTH %s", password_.c_str()));
 
     if (reply == nullptr || reply->type == REDIS_REPLY_ERROR) {
-        std::cout << "LOG: RedisConnection::authenticate() for " << host_ << ":" << port_
-                  << " - AUTH failed. Reply is " << (reply ? "not null" : "null")
-                  << (reply && reply->type == REDIS_REPLY_ERROR ? ", reply error: " + std::string(reply->str ? reply->str : "Unknown error") : "")
-                  << (!reply && context_->err ? ", context error: " + std::string(context_->errstr ? context_->errstr : "Unknown error") + " (code: " + std::to_string(context_->err) + ")" : "")
-                  << std::endl;
+        // std::cout << "LOG: RedisConnection::authenticate() for " << host_ << ":" << port_
+        //           << " - AUTH failed. Reply is " << (reply ? "not null" : "null")
+        //           << (reply && reply->type == REDIS_REPLY_ERROR ? ", reply error: " + std::string(reply->str ? reply->str : "Unknown error") : "")
+        //           << (!reply && context_->err ? ", context error: " + std::string(context_->errstr ? context_->errstr : "Unknown error") + " (code: " + std::to_string(context_->err) + ")" : "")
+        //           << std::endl;
        if (reply && reply->str) {
            last_error_message_ = "Authentication failed: " + std::string(reply->str);
        } else if (context_->errstr && context_->err != 0) { // Check context error if reply is null
@@ -180,7 +180,7 @@ bool RedisConnection::authenticate() {
         if (reply) freeReplyObject(reply);
         return false;
     }
-    std::cout << "LOG: RedisConnection::authenticate() for " << host_ << ":" << port_ << " - AUTH succeeded." << std::endl;
+    // std::cout << "LOG: RedisConnection::authenticate() for " << host_ << ":" << port_ << " - AUTH succeeded." << std::endl;
     freeReplyObject(reply);
     return true;
 }
@@ -189,18 +189,18 @@ bool RedisConnection::select_database() {
     // LOGGING: Entering select_database()
     // std::cout << "LOG: RedisConnection::select_database() for " << host_ << ":" << port_ << " - Entry. DB: " << database_ << std::endl;
     if (database_ == 0) {
-        std::cout << "LOG: RedisConnection::select_database() for " << host_ << ":" << port_ << " - Database is 0, skipping SELECT." << std::endl;
+        // std::cout << "LOG: RedisConnection::select_database() for " << host_ << ":" << port_ << " - Database is 0, skipping SELECT." << std::endl;
         return true;
     }
-    std::cout << "LOG: RedisConnection::select_database() for " << host_ << ":" << port_ << " - Calling redisCommand for SELECT " << database_ << "." << std::endl;
+    // std::cout << "LOG: RedisConnection::select_database() for " << host_ << ":" << port_ << " - Calling redisCommand for SELECT " << database_ << "." << std::endl;
     redisReply* reply = static_cast<redisReply*>(redisCommand(context_, "SELECT %d", database_));
 
     if (reply == nullptr || reply->type == REDIS_REPLY_ERROR) {
-        std::cout << "LOG: RedisConnection::select_database() for " << host_ << ":" << port_
-                  << " - SELECT " << database_ << " failed. Reply is " << (reply ? "not null" : "null")
-                  << (reply && reply->type == REDIS_REPLY_ERROR ? ", reply error: " + std::string(reply->str ? reply->str : "Unknown error") : "")
-                  << (!reply && context_->err ? ", context error: " + std::string(context_->errstr ? context_->errstr : "Unknown error") + " (code: " + std::to_string(context_->err) + ")" : "")
-                  << std::endl;
+        // std::cout << "LOG: RedisConnection::select_database() for " << host_ << ":" << port_
+        //           << " - SELECT " << database_ << " failed. Reply is " << (reply ? "not null" : "null")
+        //           << (reply && reply->type == REDIS_REPLY_ERROR ? ", reply error: " + std::string(reply->str ? reply->str : "Unknown error") : "")
+        //           << (!reply && context_->err ? ", context error: " + std::string(context_->errstr ? context_->errstr : "Unknown error") + " (code: " + std::to_string(context_->err) + ")" : "")
+        //           << std::endl;
        if (reply && reply->str) {
            last_error_message_ = "SELECT database " + std::to_string(database_) + " failed: " + std::string(reply->str);
        } else if (context_->errstr && context_->err != 0) { // Check context error if reply is null
@@ -211,7 +211,7 @@ bool RedisConnection::select_database() {
         if (reply) freeReplyObject(reply);
         return false;
     }
-    std::cout << "LOG: RedisConnection::select_database() for " << host_ << ":" << port_ << " - SELECT " << database_ << " succeeded." << std::endl;
+    // std::cout << "LOG: RedisConnection::select_database() for " << host_ << ":" << port_ << " - SELECT " << database_ << " succeeded." << std::endl;
     freeReplyObject(reply);
     return true;
 }
@@ -293,22 +293,22 @@ RedisConnectionManager::RedisConnectionPtr RedisConnectionManager::create_new_co
 }
 
 void RedisConnectionManager::initialize_pool() {
-    std::cout << "LOG: RedisConnectionManager::initialize_pool() - Entry. Pool size: " << config_.connection_pool_size << std::endl;
+    // std::cout << "LOG: RedisConnectionManager::initialize_pool() - Entry. Pool size: " << config_.connection_pool_size << std::endl;
     std::lock_guard<std::mutex> lock(pool_mutex_);
     for (int i = 0; i < config_.connection_pool_size; ++i) {
-        std::cout << "LOG: RedisConnectionManager::initialize_pool() - Attempting to create initial connection " << (i + 1) << "/" << config_.connection_pool_size << std::endl;
+        // std::cout << "LOG: RedisConnectionManager::initialize_pool() - Attempting to create initial connection " << (i + 1) << "/" << config_.connection_pool_size << std::endl;
         RedisConnection* conn_raw = new RedisConnection(config_.host, config_.port, config_.password, config_.database, config_.timeout);
         bool connected_successfully = false;
 
         if (conn_raw) {
-            std::cout << "LOG: RedisConnectionManager::initialize_pool() - Connection " << (i+1) << " allocated. Calling connect()." << std::endl;
+            // std::cout << "LOG: RedisConnectionManager::initialize_pool() - Connection " << (i+1) << " allocated. Calling connect()." << std::endl;
             connected_successfully = conn_raw->connect();
         } else {
-            std::cout << "LOG: RedisConnectionManager::initialize_pool() - Connection " << (i+1) << " FAILED TO ALLOCATE (new returned null)." << std::endl;
+            // std::cout << "LOG: RedisConnectionManager::initialize_pool() - Connection " << (i+1) << " FAILED TO ALLOCATE (new returned null)." << std::endl;
         }
 
         if (connected_successfully) {
-            std::cout << "LOG: RedisConnectionManager::initialize_pool() - Connection " << (i+1) << " connected successfully." << std::endl;
+            // std::cout << "LOG: RedisConnectionManager::initialize_pool() - Connection " << (i+1) << " connected successfully." << std::endl;
             RedisConnectionManager::RedisConnectionPtr conn(conn_raw, RedisConnectionDeleter(this));
             available_connections_.push(conn.get());
             pool_.push_back(std::move(conn));
@@ -316,7 +316,7 @@ void RedisConnectionManager::initialize_pool() {
             stats_.total_connections++;
             if (pool_.size() == 1 && i == 0) primary_healthy_ = true;
         } else {
-            std::cout << "LOG: RedisConnectionManager::initialize_pool() - Connection " << (i+1) << " FAILED to connect. Last error: " << (conn_raw ? conn_raw->get_last_error() : "N/A (allocation failed)") << std::endl;
+            // std::cout << "LOG: RedisConnectionManager::initialize_pool() - Connection " << (i+1) << " FAILED to connect. Last error: " << (conn_raw ? conn_raw->get_last_error() : "N/A (allocation failed)") << std::endl;
             stats_.connection_errors++;
             if (conn_raw) {
                 delete conn_raw;
@@ -324,29 +324,29 @@ void RedisConnectionManager::initialize_pool() {
             if (i == 0) primary_healthy_ = false;
         }
     }
-    std::cout << "LOG: RedisConnectionManager::initialize_pool() - Exit. Total connections in pool: " << pool_.size()
-              << ", Available: " << available_connections_.size()
-              << ", Stats(total/active/idle/errors): "
-              << stats_.total_connections.load() << "/" << stats_.active_connections.load() << "/"
-              << stats_.idle_connections.load() << "/" << stats_.connection_errors.load() << std::endl;
+    // std::cout << "LOG: RedisConnectionManager::initialize_pool() - Exit. Total connections in pool: " << pool_.size()
+    //           << ", Available: " << available_connections_.size()
+    //           << ", Stats(total/active/idle/errors): "
+    //           << stats_.total_connections.load() << "/" << stats_.active_connections.load() << "/"
+    //           << stats_.idle_connections.load() << "/" << stats_.connection_errors.load() << std::endl;
 }
 
 RedisConnectionManager::RedisConnectionPtr RedisConnectionManager::get_connection() {
-    std::cout << "LOG: RedisConnectionManager::get_connection() - Entry. Thread ID: " << std::this_thread::get_id() << std::endl;
+    // std::cout << "LOG: RedisConnectionManager::get_connection() - Entry. Thread ID: " << std::this_thread::get_id() << std::endl;
     std::unique_lock<std::mutex> lock(pool_mutex_);
-    std::cout << "LOG: RedisConnectionManager::get_connection() - Acquired pool_mutex_. Thread ID: " << std::this_thread::get_id() << std::endl;
+    // std::cout << "LOG: RedisConnectionManager::get_connection() - Acquired pool_mutex_. Thread ID: " << std::this_thread::get_id() << std::endl;
 
 
     while (true) {
         if (shutting_down_) {
-            std::cout << "LOG: RedisConnectionManager::get_connection() - Shutting down. Throwing ConnectionException. Thread ID: " << std::this_thread::get_id() << std::endl;
+            // std::cout << "LOG: RedisConnectionManager::get_connection() - Shutting down. Throwing ConnectionException. Thread ID: " << std::this_thread::get_id() << std::endl;
             throw ConnectionException("Connection manager is shutting down.");
         }
 
-        std::cout << "LOG: RedisConnectionManager::get_connection() - Before condition_variable.wait. Predicate: (shutting_down_ || !available_connections_.empty() || ((stats_.active_connections + pool_.size()) < config_.connection_pool_size)). Values: available_empty="
-                  << available_connections_.empty() << ", active=" << stats_.active_connections.load()
-                  << ", pool_v_sz=" << pool_.size() << ", config_pool_sz=" << config_.connection_pool_size
-                  << ". Thread ID: " << std::this_thread::get_id() << std::endl;
+        // std::cout << "LOG: RedisConnectionManager::get_connection() - Before condition_variable.wait. Predicate: (shutting_down_ || !available_connections_.empty() || ((stats_.active_connections + pool_.size()) < config_.connection_pool_size)). Values: available_empty="
+        //           << available_connections_.empty() << ", active=" << stats_.active_connections.load()
+        //           << ", pool_v_sz=" << pool_.size() << ", config_pool_sz=" << config_.connection_pool_size
+        //           << ". Thread ID: " << std::this_thread::get_id() << std::endl;
 
         condition_.wait(lock, [this] {
             // This predicate is logged before the wait by the caller
@@ -355,17 +355,17 @@ RedisConnectionManager::RedisConnectionPtr RedisConnectionManager::get_connectio
                    ((stats_.active_connections + pool_.size()) < static_cast<size_t>(this->config_.connection_pool_size));
         });
 
-        std::cout << "LOG: RedisConnectionManager::get_connection() - Woke up from condition_variable.wait. Thread ID: " << std::this_thread::get_id() << std::endl;
+        // std::cout << "LOG: RedisConnectionManager::get_connection() - Woke up from condition_variable.wait. Thread ID: " << std::this_thread::get_id() << std::endl;
 
         if (shutting_down_) {
-            std::cout << "LOG: RedisConnectionManager::get_connection() - Shutting down (checked after wait). Throwing ConnectionException. Thread ID: " << std::this_thread::get_id() << std::endl;
+            // std::cout << "LOG: RedisConnectionManager::get_connection() - Shutting down (checked after wait). Throwing ConnectionException. Thread ID: " << std::this_thread::get_id() << std::endl;
             throw ConnectionException("Connection manager is shutting down while waiting for a connection.");
         }
 
         RedisConnectionManager::RedisConnectionPtr conn_to_return;
 
         if (!available_connections_.empty()) {
-            std::cout << "LOG: RedisConnectionManager::get_connection() - Path: Taking from available_connections_ (size=" << available_connections_.size() << "). Thread ID: " << std::this_thread::get_id() << std::endl;
+            // std::cout << "LOG: RedisConnectionManager::get_connection() - Path: Taking from available_connections_ (size=" << available_connections_.size() << "). Thread ID: " << std::this_thread::get_id() << std::endl;
             RedisConnection* raw_conn = available_connections_.front();
             available_connections_.pop();
             stats_.idle_connections--;
@@ -376,9 +376,9 @@ RedisConnectionManager::RedisConnectionPtr RedisConnectionManager::get_connectio
             if (it != pool_.end()) {
                 conn_to_return = std::move(*it);
                 pool_.erase(it);
-                std::cout << "LOG: RedisConnectionManager::get_connection() - Moved connection from pool_ vector. New pool_ vector size: " << pool_.size() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
+                // std::cout << "LOG: RedisConnectionManager::get_connection() - Moved connection from pool_ vector. New pool_ vector size: " << pool_.size() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
             } else {
-                std::cout << "ERROR_LOG: RedisConnectionManager::get_connection() - Connection from available_connections_ not found in pool_ vector! This should not happen. Retrying. Thread ID: " << std::this_thread::get_id() << std::endl;
+                // std::cout << "ERROR_LOG: RedisConnectionManager::get_connection() - Connection from available_connections_ not found in pool_ vector! This should not happen. Retrying. Thread ID: " << std::this_thread::get_id() << std::endl;
                 stats_.idle_connections++;
                 continue;
             }
@@ -386,15 +386,15 @@ RedisConnectionManager::RedisConnectionPtr RedisConnectionManager::get_connectio
             bool healthy = true;
             if (conn_to_return && conn_to_return->is_connected()) {
                 if (std::chrono::steady_clock::now() - conn_to_return->last_used_time > max_idle_time_before_ping_) {
-                    std::cout << "LOG: RedisConnectionManager::get_connection() - Idle connection requires ping. Unlocking for ping. Thread ID: " << std::this_thread::get_id() << std::endl;
+                    // std::cout << "LOG: RedisConnectionManager::get_connection() - Idle connection requires ping. Unlocking for ping. Thread ID: " << std::this_thread::get_id() << std::endl;
                     lock.unlock();
-                    std::cout << "LOG: RedisConnectionManager::get_connection() - Calling ping() for " << conn_to_return->get_host() << ":" << conn_to_return->get_port() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
+                    // std::cout << "LOG: RedisConnectionManager::get_connection() - Calling ping() for " << conn_to_return->get_host() << ":" << conn_to_return->get_port() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
                     healthy = conn_to_return->ping();
-                    std::cout << "LOG: RedisConnectionManager::get_connection() - Ping result: " << healthy << ". Relocking. Thread ID: " << std::this_thread::get_id() << std::endl;
+                    // std::cout << "LOG: RedisConnectionManager::get_connection() - Ping result: " << healthy << ". Relocking. Thread ID: " << std::this_thread::get_id() << std::endl;
                     lock.lock();
 
                     if (shutting_down_) {
-                         std::cout << "LOG: RedisConnectionManager::get_connection() - Shutting down during health check. Disconnecting and throwing. Thread ID: " << std::this_thread::get_id() << std::endl;
+                        //  std::cout << "LOG: RedisConnectionManager::get_connection() - Shutting down during health check. Disconnecting and throwing. Thread ID: " << std::this_thread::get_id() << std::endl;
                         if (conn_to_return) {
                             conn_to_return->disconnect();
                         }
@@ -403,40 +403,40 @@ RedisConnectionManager::RedisConnectionPtr RedisConnectionManager::get_connectio
                 }
             } else if (conn_to_return) {
                 healthy = false;
-                std::cout << "LOG: RedisConnectionManager::get_connection() - Connection from pool was not connected. Healthy=false. Thread ID: " << std::this_thread::get_id() << std::endl;
+                // std::cout << "LOG: RedisConnectionManager::get_connection() - Connection from pool was not connected. Healthy=false. Thread ID: " << std::this_thread::get_id() << std::endl;
             } else {
                 healthy = false;
-                std::cout << "ERROR_LOG: RedisConnectionManager::get_connection() - conn_to_return is null after move from pool. Healthy=false. This is unexpected. Thread ID: " << std::this_thread::get_id() << std::endl;
+                // std::cout << "ERROR_LOG: RedisConnectionManager::get_connection() - conn_to_return is null after move from pool. Healthy=false. This is unexpected. Thread ID: " << std::this_thread::get_id() << std::endl;
             }
 
             if (!healthy) {
-                std::cout << "LOG: RedisConnectionManager::get_connection() - Connection not healthy. Discarding. Thread ID: " << std::this_thread::get_id() << std::endl;
+                // std::cout << "LOG: RedisConnectionManager::get_connection() - Connection not healthy. Discarding. Thread ID: " << std::this_thread::get_id() << std::endl;
                 stats_.connection_errors++;
                 if (conn_to_return) {
                     stats_.total_connections--;
-                    std::cout << "LOG: RedisConnectionManager::get_connection() - Decremented total_connections to " << stats_.total_connections.load() << ". Releasing and deleting. Thread ID: " << std::this_thread::get_id() << std::endl;
+                    // std::cout << "LOG: RedisConnectionManager::get_connection() - Decremented total_connections to " << stats_.total_connections.load() << ". Releasing and deleting. Thread ID: " << std::this_thread::get_id() << std::endl;
                     RedisConnection* raw_to_delete = conn_to_return.release();
                     delete raw_to_delete;
                 }
                 continue;
             }
             stats_.active_connections++;
-            std::cout << "LOG: RedisConnectionManager::get_connection() - Returning healthy connection from pool. Active: " << stats_.active_connections.load() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
+            // std::cout << "LOG: RedisConnectionManager::get_connection() - Returning healthy connection from pool. Active: " << stats_.active_connections.load() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
             return conn_to_return;
 
         } else if ((stats_.active_connections + pool_.size()) < static_cast<size_t>(config_.connection_pool_size)) {
-            std::cout << "LOG: RedisConnectionManager::get_connection() - Path: Creating new connection. Active=" << stats_.active_connections.load()
-                      << ", pool_v_sz=" << pool_.size() << ", config_pool_sz=" << config_.connection_pool_size
-                      << ". Unlocking for create. Thread ID: " << std::this_thread::get_id() << std::endl;
+            // std::cout << "LOG: RedisConnectionManager::get_connection() - Path: Creating new connection. Active=" << stats_.active_connections.load()
+            //           << ", pool_v_sz=" << pool_.size() << ", config_pool_sz=" << config_.connection_pool_size
+            //           << ". Unlocking for create. Thread ID: " << std::this_thread::get_id() << std::endl;
             lock.unlock();
 
-            std::cout << "LOG: RedisConnectionManager::get_connection() - Calling create_new_connection_ptr(). Thread ID: " << std::this_thread::get_id() << std::endl;
+            // std::cout << "LOG: RedisConnectionManager::get_connection() - Calling create_new_connection_ptr(). Thread ID: " << std::this_thread::get_id() << std::endl;
             RedisConnectionManager::RedisConnectionPtr new_conn = create_new_connection_ptr(config_.host, config_.port);
-            std::cout << "LOG: RedisConnectionManager::get_connection() - create_new_connection_ptr() returned. Relocking. Thread ID: " << std::this_thread::get_id() << std::endl;
+            // std::cout << "LOG: RedisConnectionManager::get_connection() - create_new_connection_ptr() returned. Relocking. Thread ID: " << std::this_thread::get_id() << std::endl;
             lock.lock();
 
             if (shutting_down_) {
-                std::cout << "LOG: RedisConnectionManager::get_connection() - Shutting down during new connection creation. Disconnecting and throwing. Thread ID: " << std::this_thread::get_id() << std::endl;
+                // std::cout << "LOG: RedisConnectionManager::get_connection() - Shutting down during new connection creation. Disconnecting and throwing. Thread ID: " << std::this_thread::get_id() << std::endl;
                 if(new_conn) new_conn->disconnect(); // The unique_ptr deleter will handle return_connection
                 throw ConnectionException("Connection manager is shutting down during new connection creation.");
             }
@@ -444,35 +444,35 @@ RedisConnectionManager::RedisConnectionPtr RedisConnectionManager::get_connectio
             if (new_conn && new_conn->is_connected()) {
                 stats_.total_connections++;
                 stats_.active_connections++;
-                std::cout << "LOG: RedisConnectionManager::get_connection() - Returning newly created healthy connection. Total: "
-                          << stats_.total_connections.load() << ", Active: " << stats_.active_connections.load()
-                          << ". Thread ID: " << std::this_thread::get_id() << std::endl;
+                // std::cout << "LOG: RedisConnectionManager::get_connection() - Returning newly created healthy connection. Total: "
+                //           << stats_.total_connections.load() << ", Active: " << stats_.active_connections.load()
+                //           << ". Thread ID: " << std::this_thread::get_id() << std::endl;
                 return new_conn;
             } else {
                 stats_.connection_errors++;
                 std::string error_detail = (new_conn ? new_conn->get_last_error() : "Failed to allocate RedisConnection object.");
-                std::cout << "ERROR_LOG: RedisConnectionManager::get_connection() - Failed to create or connect new connection. Error: " << error_detail << ". Throwing. Thread ID: " << std::this_thread::get_id() << std::endl;
+                // std::cout << "ERROR_LOG: RedisConnectionManager::get_connection() - Failed to create or connect new connection. Error: " << error_detail << ". Throwing. Thread ID: " << std::this_thread::get_id() << std::endl;
                 // new_conn unique_ptr will be destroyed, its deleter calls return_connection, which will delete the raw object.
                 throw ConnectionException("Failed to create new connection to " + config_.host + ":" + std::to_string(config_.port) + ". Detail: " + error_detail);
             }
         } else {
             // This should ideally not be reached if wait predicate is correct and config_.connection_pool_size > 0.
             // If it is, it means available_connections_ is empty AND (active + pool_.size()) >= config_.connection_pool_size
-            std::cout << "ERROR_LOG: RedisConnectionManager::get_connection() - No available connections and pool is at max capacity. Throwing. This state should ideally be caught by CV wait. Active="
-                      << stats_.active_connections.load() << ", pool_v_sz=" << pool_.size() << ", config_pool_sz=" << config_.connection_pool_size
-                      << ". Thread ID: " << std::this_thread::get_id() << std::endl;
+            // std::cout << "ERROR_LOG: RedisConnectionManager::get_connection() - No available connections and pool is at max capacity. Throwing. This state should ideally be caught by CV wait. Active="
+            //           << stats_.active_connections.load() << ", pool_v_sz=" << pool_.size() << ", config_pool_sz=" << config_.connection_pool_size
+            //           << ". Thread ID: " << std::this_thread::get_id() << std::endl;
             throw ConnectionException("No available connections and pool is at max capacity and cannot create more.");
         }
     }
 }
 
 void RedisConnectionManager::return_connection(RedisConnectionManager::RedisConnectionPtr conn_param_owner) {
-    std::cout << "LOG: RedisConnectionManager::return_connection() - Entry. Conn valid: " << (conn_param_owner ? "true" : "false")
-              << (conn_param_owner ? ", Host: " + conn_param_owner->get_host() + ":" + std::to_string(conn_param_owner->get_port()) : "")
-              << ". Thread ID: " << std::this_thread::get_id() << std::endl;
+    // std::cout << "LOG: RedisConnectionManager::return_connection() - Entry. Conn valid: " << (conn_param_owner ? "true" : "false")
+    //           << (conn_param_owner ? ", Host: " + conn_param_owner->get_host() + ":" + std::to_string(conn_param_owner->get_port()) : "")
+    //           << ". Thread ID: " << std::this_thread::get_id() << std::endl;
 
     if (!conn_param_owner) {
-        std::cout << "LOG: RedisConnectionManager::return_connection() - Null connection pointer passed, returning early. Thread ID: " << std::this_thread::get_id() << std::endl;
+        // std::cout << "LOG: RedisConnectionManager::return_connection() - Null connection pointer passed, returning early. Thread ID: " << std::this_thread::get_id() << std::endl;
         return;
     }
 
@@ -482,14 +482,14 @@ void RedisConnectionManager::return_connection(RedisConnectionManager::RedisConn
 
     {
         std::unique_lock<std::mutex> lock(pool_mutex_);
-        std::cout << "LOG: RedisConnectionManager::return_connection() - Acquired pool_mutex_. Current stats: Active=" << stats_.active_connections.load()
-                  << ", Total=" << stats_.total_connections.load() << ", Idle=" << stats_.idle_connections.load()
-                  << ", PoolVecSize=" << pool_.size() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
+        // std::cout << "LOG: RedisConnectionManager::return_connection() - Acquired pool_mutex_. Current stats: Active=" << stats_.active_connections.load()
+        //           << ", Total=" << stats_.total_connections.load() << ", Idle=" << stats_.idle_connections.load()
+        //           << ", PoolVecSize=" << pool_.size() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
 
         bool actually_needs_notification = false;
 
         if (shutting_down_.load()) {
-            std::cout << "LOG: RedisConnectionManager::return_connection() - Shutting down mode. Disconnecting raw connection. Thread ID: " << std::this_thread::get_id() << std::endl;
+            // std::cout << "LOG: RedisConnectionManager::return_connection() - Shutting down mode. Disconnecting raw connection. Thread ID: " << std::this_thread::get_id() << std::endl;
             conn_raw->disconnect();
             repool_this_connection = false;
             // Stats (active, total) are globally reset by close_all_connections. No individual decrements here.
@@ -501,21 +501,21 @@ void RedisConnectionManager::return_connection(RedisConnectionManager::RedisConn
             } else {
                  // This might happen if a connection from health_check_loop's connections_to_remove_outside_lock
                  // calls this via its deleter, and it was never made "active".
-                 std::cout << "WARNING_LOG: RedisConnectionManager::return_connection() - active_connections was already 0 or less during normal return. Active: " << stats_.active_connections.load() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
+                 // std::cout << "WARNING_LOG: RedisConnectionManager::return_connection() - active_connections was already 0 or less during normal return. Active: " << stats_.active_connections.load() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
             }
-            std::cout << "LOG: RedisConnectionManager::return_connection() - Active after dec: " << stats_.active_connections.load() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
+            // std::cout << "LOG: RedisConnectionManager::return_connection() - Active after dec: " << stats_.active_connections.load() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
 
             if (conn_raw->is_connected() && pool_.size() < static_cast<size_t>(config_.connection_pool_size)) {
-                std::cout << "LOG: RedisConnectionManager::return_connection() - Connection is connected and pool has space (pool_v_sz=" << pool_.size() << ", config_pool_sz=" << config_.connection_pool_size << "). Repooling. Thread ID: " << std::this_thread::get_id() << std::endl;
+                // std::cout << "LOG: RedisConnectionManager::return_connection() - Connection is connected and pool has space (pool_v_sz=" << pool_.size() << ", config_pool_sz=" << config_.connection_pool_size << "). Repooling. Thread ID: " << std::this_thread::get_id() << std::endl;
                 repool_this_connection = true;
                 available_connections_.push(conn_raw);
                 pool_.push_back(std::move(conn_param_owner));
                 stats_.idle_connections++;
                 actually_needs_notification = true;
             } else {
-                std::cout << "LOG: RedisConnectionManager::return_connection() - Not repooling (normal ops). Connected: " << conn_raw->is_connected()
-                          << ", Pool full? (pool_v_sz=" << pool_.size() << ", config_pool_sz=" << config_.connection_pool_size << ")"
-                          << ". Disconnecting. Thread ID: " << std::this_thread::get_id() << std::endl;
+                // std::cout << "LOG: RedisConnectionManager::return_connection() - Not repooling (normal ops). Connected: " << conn_raw->is_connected()
+                //           << ", Pool full? (pool_v_sz=" << pool_.size() << ", config_pool_sz=" << config_.connection_pool_size << ")"
+                //           << ". Disconnecting. Thread ID: " << std::this_thread::get_id() << std::endl;
                 if (!conn_raw->is_connected()) {
                     stats_.connection_errors++;
                 }
@@ -524,45 +524,45 @@ void RedisConnectionManager::return_connection(RedisConnectionManager::RedisConn
                 if (stats_.total_connections > 0) {
                     stats_.total_connections--;
                     actually_needs_notification = true;
-                    std::cout << "LOG: RedisConnectionManager::return_connection() - Connection not repooled (normal ops), decremented total_connections to " << stats_.total_connections.load() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
+                    // std::cout << "LOG: RedisConnectionManager::return_connection() - Connection not repooled (normal ops), decremented total_connections to " << stats_.total_connections.load() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
                 } else {
-                    std::cout << "LOG: RedisConnectionManager::return_connection() - Connection not repooled (normal ops), but total_connections already 0. Not decrementing. Thread ID: " << std::this_thread::get_id() << std::endl;
+                    // std::cout << "LOG: RedisConnectionManager::return_connection() - Connection not repooled (normal ops), but total_connections already 0. Not decrementing. Thread ID: " << std::this_thread::get_id() << std::endl;
                 }
             }
         } // End of !shutting_down_ block
 
         if (actually_needs_notification) { // Only notify if not in overall shutdown and a change occurred
-            std::cout << "LOG: RedisConnectionManager::return_connection() - Calling condition_.notify_one(). Thread ID: " << std::this_thread::get_id() << std::endl;
+            // std::cout << "LOG: RedisConnectionManager::return_connection() - Calling condition_.notify_one(). Thread ID: " << std::this_thread::get_id() << std::endl;
             condition_.notify_one();
         }
-        std::cout << "LOG: RedisConnectionManager::return_connection() - Releasing pool_mutex_. Thread ID: " << std::this_thread::get_id() << std::endl;
+        // std::cout << "LOG: RedisConnectionManager::return_connection() - Releasing pool_mutex_. Thread ID: " << std::this_thread::get_id() << std::endl;
     }
 
     if (!repool_this_connection) {
-        std::cout << "LOG: RedisConnectionManager::return_connection() - Connection was not repooled. Releasing and deleting raw pointer. Thread ID: " << std::this_thread::get_id() << std::endl;
+        // std::cout << "LOG: RedisConnectionManager::return_connection() - Connection was not repooled. Releasing and deleting raw pointer. Thread ID: " << std::this_thread::get_id() << std::endl;
         RedisConnection* to_delete = conn_param_owner.release();
         delete to_delete;
     } else {
-        std::cout << "LOG: RedisConnectionManager::return_connection() - Connection was repooled. conn_param_owner is now null. Thread ID: " << std::this_thread::get_id() << std::endl;
+        // std::cout << "LOG: RedisConnectionManager::return_connection() - Connection was repooled. conn_param_owner is now null. Thread ID: " << std::this_thread::get_id() << std::endl;
     }
-    std::cout << "LOG: RedisConnectionManager::return_connection() - Exit. Thread ID: " << std::this_thread::get_id() << std::endl;
+    // std::cout << "LOG: RedisConnectionManager::return_connection() - Exit. Thread ID: " << std::this_thread::get_id() << std::endl;
 }
 
 void RedisConnectionManager::close_all_connections() {
-    std::cout << "LOG: RedisConnectionManager::close_all_connections() - Entry. Thread ID: " << std::this_thread::get_id() << std::endl;
+    // std::cout << "LOG: RedisConnectionManager::close_all_connections() - Entry. Thread ID: " << std::this_thread::get_id() << std::endl;
     std::vector<RedisConnectionManager::RedisConnectionPtr> connections_to_destroy_outside_lock;
 
     { // Start of critical section for modifying shared pool structures
         std::lock_guard<std::mutex> lock(pool_mutex_);
-        std::cout << "LOG: RedisConnectionManager::close_all_connections() - Acquired pool_mutex_. Thread ID: " << std::this_thread::get_id() << std::endl;
+        // std::cout << "LOG: RedisConnectionManager::close_all_connections() - Acquired pool_mutex_. Thread ID: " << std::this_thread::get_id() << std::endl;
         shutting_down_ = true; // Ensure this is unequivocally set
 
         // Move connections from the main pool to a temporary vector
         if (!pool_.empty()) {
             connections_to_destroy_outside_lock.swap(pool_);
-            std::cout << "LOG: RedisConnectionManager::close_all_connections() - Moved " << connections_to_destroy_outside_lock.size() << " connections from pool_ to temporary vector. pool_ is now empty. Thread ID: " << std::this_thread::get_id() << std::endl;
+            // std::cout << "LOG: RedisConnectionManager::close_all_connections() - Moved " << connections_to_destroy_outside_lock.size() << " connections from pool_ to temporary vector. pool_ is now empty. Thread ID: " << std::this_thread::get_id() << std::endl;
         } else {
-            std::cout << "LOG: RedisConnectionManager::close_all_connections() - pool_ vector was already empty. Thread ID: " << std::this_thread::get_id() << std::endl;
+            // std::cout << "LOG: RedisConnectionManager::close_all_connections() - pool_ vector was already empty. Thread ID: " << std::this_thread::get_id() << std::endl;
         }
 
 
@@ -570,9 +570,9 @@ void RedisConnectionManager::close_all_connections() {
         if (!available_connections_.empty()) {
             std::queue<RedisConnection*> empty_queue;
             std::swap(available_connections_, empty_queue);
-            std::cout << "LOG: RedisConnectionManager::close_all_connections() - Cleared available_connections_ queue. Thread ID: " << std::this_thread::get_id() << std::endl;
+            // std::cout << "LOG: RedisConnectionManager::close_all_connections() - Cleared available_connections_ queue. Thread ID: " << std::this_thread::get_id() << std::endl;
         } else {
-            std::cout << "LOG: RedisConnectionManager::close_all_connections() - available_connections_ queue was already empty. Thread ID: " << std::this_thread::get_id() << std::endl;
+            // std::cout << "LOG: RedisConnectionManager::close_all_connections() - available_connections_ queue was already empty. Thread ID: " << std::this_thread::get_id() << std::endl;
         }
 
         // Reset statistics
@@ -580,16 +580,16 @@ void RedisConnectionManager::close_all_connections() {
         stats_.idle_connections = 0;
         stats_.total_connections = 0;
         primary_healthy_ = false;
-        std::cout << "LOG: RedisConnectionManager::close_all_connections() - Stats reset. Notifying any remaining waiters. Thread ID: " << std::this_thread::get_id() << std::endl;
+        // std::cout << "LOG: RedisConnectionManager::close_all_connections() - Stats reset. Notifying any remaining waiters. Thread ID: " << std::this_thread::get_id() << std::endl;
         condition_.notify_all();
     } // Mutex is released here
-    std::cout << "LOG: RedisConnectionManager::close_all_connections() - Released pool_mutex_. Thread ID: " << std::this_thread::get_id() << std::endl;
+    // std::cout << "LOG: RedisConnectionManager::close_all_connections() - Released pool_mutex_. Thread ID: " << std::this_thread::get_id() << std::endl;
 
-    std::cout << "LOG: RedisConnectionManager::close_all_connections() - Destroying " << connections_to_destroy_outside_lock.size() << " connections outside of lock. Thread ID: " << std::this_thread::get_id() << std::endl;
+    // std::cout << "LOG: RedisConnectionManager::close_all_connections() - Destroying " << connections_to_destroy_outside_lock.size() << " connections outside of lock. Thread ID: " << std::this_thread::get_id() << std::endl;
     // Now, when connections_to_destroy_outside_lock is cleared (or goes out of scope),
     // their deleters will call return_connection. return_connection will acquire pool_mutex_ (which is now free).
     connections_to_destroy_outside_lock.clear();
-    std::cout << "LOG: RedisConnectionManager::close_all_connections() - Finished destroying connections. Exiting function. Thread ID: " << std::this_thread::get_id() << std::endl;
+    // std::cout << "LOG: RedisConnectionManager::close_all_connections() - Finished destroying connections. Exiting function. Thread ID: " << std::this_thread::get_id() << std::endl;
 }
 
 bool RedisConnectionManager::is_healthy() const {
@@ -699,7 +699,7 @@ void RedisConnectionManager::health_check_loop() {
         // This re-acquires the mutex for the condition variable.
         std::unique_lock<std::mutex> cv_lock(pool_mutex_); 
         if (shutting_down_.load() || !run_health_checker_.load()) { // .load() for atomics
-            std::cout << "LOG: RedisConnectionManager::health_check_loop() - Breaking before wait_for. Shutting down: " << shutting_down_.load() << ", Run checker: " << run_health_checker_.load() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
+            // std::cout << "LOG: RedisConnectionManager::health_check_loop() - Breaking before wait_for. Shutting down: " << shutting_down_.load() << ", Run checker: " << run_health_checker_.load() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
             break;
         }
         condition_.wait_for(cv_lock, health_check_interval_, [this]{
@@ -708,8 +708,8 @@ void RedisConnectionManager::health_check_loop() {
             return predicate_result;
         });
     }
-    std::cout << "LOG: RedisConnectionManager::health_check_loop() - Exited while loop. Final flags: run_health_checker_=" << run_health_checker_.load()
-              << ", shutting_down_=" << shutting_down_.load() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
+    // std::cout << "LOG: RedisConnectionManager::health_check_loop() - Exited while loop. Final flags: run_health_checker_=" << run_health_checker_.load()
+    //           << ", shutting_down_=" << shutting_down_.load() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
 }
 
 void RedisConnectionManager::maintain_pool_size(std::unique_lock<std::mutex>& lock) {
