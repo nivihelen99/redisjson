@@ -212,7 +212,7 @@ void run_atomic_operations(redisjson::RedisJSONClient& client) {
 
     // 1. Atomic Get and Set
     try {
-        json old_value = client.atomic_get_set(atomic_key, "value", 10);
+        json old_value = client.non_atomic_get_set(atomic_key, "value", 10);
         std::cout << "SUCCESS: ATOMIC_GET_SET on 'value'. Old value: " << old_value.dump()
                   << ", New value: " << client.get_path(atomic_key, "value").dump() << std::endl;
     } catch (const redisjson::RedisJSONException& e) {
@@ -222,12 +222,12 @@ void run_atomic_operations(redisjson::RedisJSONClient& client) {
 
     // 2. Atomic Compare and Set
     try {
-        bool success = client.atomic_compare_set(atomic_key, "version", 1, 2);
+        bool success = client.non_atomic_compare_set(atomic_key, "version", 1, 2);
         std::cout << "\nSUCCESS: ATOMIC_COMPARE_SET on 'version' (expected 1, new 2). Success: "
                   << (success ? "true" : "false") << std::endl;
         std::cout << "Current 'version': " << client.get_path(atomic_key, "version").dump() << std::endl;
 
-        success = client.atomic_compare_set(atomic_key, "version", 1, 5); // This should fail
+        success = client.non_atomic_compare_set(atomic_key, "version", 1, 5); // This should fail
         std::cout << "\nSUCCESS: ATOMIC_COMPARE_SET on 'version' (expected 1, new 5). Success: "
                   << (success ? "true" : "false") << std::endl;
         std::cout << "Current 'version': " << client.get_path(atomic_key, "version").dump() << std::endl;
@@ -357,16 +357,13 @@ int main() {
     } else {
         std::cout << "Legacy mode example skipped. Set RUN_REDISJSON_LEGACY_EXAMPLE=1 to run." << std::endl;
     }
-        return 1;
-    } catch (const redisjson::RedisJSONException& e) {
-        std::cerr << "CRITICAL: A RedisJSON++ error occurred: " << e.what() << std::endl;
-        return 1;
-    } catch (const std::exception& e) {
-        std::cerr << "CRITICAL: A standard C++ exception occurred: " << e.what() << std::endl;
-        return 1;
-    }
+    // The return 0; was moved inside the main try block or to the end of the main function
+    // The extra catch blocks that were here were removed as they were misplaced.
+    // The main function's primary try-catch block (lines 266-284) handles exceptions for the SWSS part.
+    // The legacy part (if enabled) has its own try-catch block (lines 347-355).
+    // A final return 0 should be at the very end of main if all went well.
 
-    return 0;
+    return 0; // Assuming success if we reached here without exiting due to an error.
 }
 
 /*
