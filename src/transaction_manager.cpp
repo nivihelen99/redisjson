@@ -6,7 +6,7 @@ namespace redisjson {
 
 // --- TransactionManager::Transaction Implementation ---
 
-TransactionManager::Transaction::Transaction(std::unique_ptr<RedisConnection> conn,
+TransactionManager::Transaction::Transaction(RedisConnectionManager::RedisConnectionPtr conn,
                                              PathParser* path_parser,
                                              JSONModifier* json_modifier)
     : connection_(std::move(conn)),
