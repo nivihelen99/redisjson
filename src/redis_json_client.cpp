@@ -12,10 +12,10 @@
 
 // Note: Forward declaration of redisContext for the fake DBConnector if actual headers are not found
 // This is not ideal but helps with isolated compilation if the environment is not fully set up.
-#ifndef HIREDIS_H
-struct redisContext {};
-struct redisReply {};
-#endif
+// #ifndef HIREDIS_H  // Removed as hiredis.h should be included via redis_json_client.h
+// struct redisContext {};
+// struct redisReply {};
+// #endif
 
 
 namespace redisjson {
@@ -74,7 +74,7 @@ RedisJSONClient::~RedisJSONClient() {
 
 RedisConnectionManager::RedisConnectionPtr RedisJSONClient::get_legacy_redis_connection() const {
     if (_is_swss_mode || !_connection_manager) {
-        throw RedisInternalException("Legacy connection manager not available in SWSS mode or not initialized.");
+        throw RedisJSONException("Legacy connection manager not available in SWSS mode or not initialized.");
     }
     try {
         return _connection_manager->get_connection();
@@ -90,7 +90,7 @@ void RedisJSONClient::set_json(const std::string& key, const json& document, con
     std::string doc_str = document.dump();
 
     if (_is_swss_mode) {
-        if (!_db_connector) throw RedisInternalException("DBConnector not initialized for SWSS mode.");
+        if (!_db_connector) throw RedisJSONException("DBConnector not initialized for SWSS mode.");
         try {
             // Construct command parts for SET [NX|XX] [EX seconds]
             // SWSS DBConnector's set method might not directly support NX/XX/EX.
@@ -204,7 +204,7 @@ void RedisJSONClient::set_json(const std::string& key, const json& document, con
 
 json RedisJSONClient::get_json(const std::string& key) const {
     if (_is_swss_mode) {
-        if (!_db_connector) throw RedisInternalException("DBConnector not initialized for SWSS mode.");
+        if (!_db_connector) throw RedisJSONException("DBConnector not initialized for SWSS mode.");
         try {
             std::string doc_str = _db_connector->get(key);
             if (doc_str.empty()) { // Assuming empty string means key not found for DBConnector::get
@@ -246,7 +246,7 @@ json RedisJSONClient::get_json(const std::string& key) const {
 
 bool RedisJSONClient::exists_json(const std::string& key) const {
     if (_is_swss_mode) {
-        if (!_db_connector) throw RedisInternalException("DBConnector not initialized for SWSS mode.");
+        if (!_db_connector) throw RedisJSONException("DBConnector not initialized for SWSS mode.");
         try {
             return _db_connector->exists(key);
         } catch (const std::exception& e) {
@@ -267,7 +267,7 @@ bool RedisJSONClient::exists_json(const std::string& key) const {
 
 void RedisJSONClient::del_json(const std::string& key) {
     if (_is_swss_mode) {
-        if (!_db_connector) throw RedisInternalException("DBConnector not initialized for SWSS mode.");
+        if (!_db_connector) throw RedisJSONException("DBConnector not initialized for SWSS mode.");
         try {
             _db_connector->del(key); // Assuming del returns void or count, not checked here for basic del
         } catch (const std::exception& e) {
@@ -344,12 +344,12 @@ json RedisJSONClient::get_path(const std::string& key, const std::string& path_s
         } catch (const json::out_of_range& e) { // nlohmann throws this if path not found
             throw PathNotFoundException(key, path_str);
         } catch (const json::parse_error& e) { // If path string is invalid for json_pointer
-            throw InvalidPathException(path_str, e.what());
+            throw InvalidPathException(path_str + " (JSON pointer parse error: " + e.what() + ")");
         } catch (const PathNotFoundException&) { // If underlying get_json failed
             throw;
         }
     } else { // Legacy mode (Lua based)
-        if (!_lua_script_manager) throw RedisInternalException("LuaScriptManager not initialized.");
+        if (!_lua_script_manager) throw RedisJSONException("LuaScriptManager not initialized.");
         std::vector<std::string> keys = {key};
         std::vector<std::string> args = {path_str};
         try {
@@ -360,6 +360,8 @@ json RedisJSONClient::get_path(const std::string& key, const std::string& path_s
             throw RedisCommandException("LUA_json_path_get", "Key: " + key + ", Path: " + path_str + ", Error: " + e.what());
         }
     }
+    // Fallback to satisfy compiler, should be unreachable due to boolean _is_swss_mode
+    throw RedisJSONException("Internal logic error: get_path reached end of function unexpectedly for key '" + key + "', path '" + path_str + "'.");
 }
 
 void RedisJSONClient::set_path(const std::string& key, const std::string& path_str,
@@ -381,7 +383,7 @@ void RedisJSONClient::set_path(const std::string& key, const std::string& path_s
              throw; // Rethrow if modification logic itself determines path cannot be created
         }
     } else { // Legacy mode
-        if (!_lua_script_manager) throw RedisInternalException("LuaScriptManager not initialized.");
+        if (!_lua_script_manager) throw RedisJSONException("LuaScriptManager not initialized.");
         std::string value_dump = value.dump();
         std::string condition_str;
         switch (opts.condition) {
@@ -432,7 +434,7 @@ void RedisJSONClient::del_path(const std::string& key, const std::string& path_s
             throw RedisCommandException("DEL_PATH (SWSS-Client)", "Key: " + key + ", Path: " + path_str + ", JSON mod error: " + e.what());
         }
     } else { // Legacy
-        if (!_lua_script_manager) throw RedisInternalException("LuaScriptManager not initialized.");
+        if (!_lua_script_manager) throw RedisJSONException("LuaScriptManager not initialized.");
         std::vector<std::string> keys = {key};
         std::vector<std::string> args = {path_str};
         try {
@@ -455,10 +457,10 @@ bool RedisJSONClient::exists_path(const std::string& key, const std::string& pat
         } catch (const PathNotFoundException&) {
             return false; // Key itself doesn't exist, so path cannot exist.
         } catch (const json::exception& e) { // Errors during path parsing by modifier
-             throw InvalidPathException(path_str, "Error checking path existence: " + std::string(e.what()));
+             throw InvalidPathException("Error checking path existence for path '" + path_str + "': " + std::string(e.what()));
         }
     } else { // Legacy
-        if (!_lua_script_manager) throw RedisInternalException("LuaScriptManager not initialized.");
+        if (!_lua_script_manager) throw RedisJSONException("LuaScriptManager not initialized.");
         std::vector<std::string> keys = {key};
         std::vector<std::string> args = {path_str};
         try {
@@ -475,6 +477,8 @@ bool RedisJSONClient::exists_path(const std::string& key, const std::string& pat
             throw RedisCommandException("LUA_json_path_type", "Key: " + key + ", Path: " + path_str + ", Error: " + e.what());
         }
     }
+    // Fallback to satisfy compiler, should be unreachable due to boolean _is_swss_mode
+    throw RedisJSONException("Internal logic error: exists_path reached end of function unexpectedly for key '" + key + "', path '" + path_str + "'.");
 }
 
 
@@ -496,7 +500,7 @@ void RedisJSONClient::append_path(const std::string& key, const std::string& pat
             throw RedisCommandException("APPEND_PATH (SWSS-Client)", "Key: " + key + ", Path: " + path_str + ", JSON mod error: " + e.what());
         }
     } else { // Legacy
-        if (!_lua_script_manager) throw RedisInternalException("LuaScriptManager not initialized.");
+        if (!_lua_script_manager) throw RedisJSONException("LuaScriptManager not initialized.");
         std::vector<std::string> keys = {key};
         std::vector<std::string> args = {path_str, value.dump()};
         try {
@@ -522,7 +526,7 @@ void RedisJSONClient::prepend_path(const std::string& key, const std::string& pa
             throw RedisCommandException("PREPEND_PATH (SWSS-Client)", "Key: " + key + ", Path: " + path_str + ", JSON mod error: " + e.what());
         }
     } else { // Legacy
-        if (!_lua_script_manager) throw RedisInternalException("LuaScriptManager not initialized.");
+        if (!_lua_script_manager) throw RedisJSONException("LuaScriptManager not initialized.");
         std::vector<std::string> keys = {key};
         std::vector<std::string> args = {path_str, value.dump()};
         try {
@@ -547,14 +551,14 @@ json RedisJSONClient::pop_path(const std::string& key, const std::string& path_s
         } catch (const PathNotFoundException& e){ // Path (or key) does not exist
             throw;
         } catch (const json::out_of_range& e) { // Index out of bounds from nlohmann::json if modifier doesn't catch it
-            throw PathNotFoundException(key, path_str + "[" + std::to_string(index) + "]", "Index out of bounds for pop: " + std::string(e.what()));
+            throw PathNotFoundException(key, path_str + "[" + std::to_string(index) + "] (Index out of bounds for pop: " + std::string(e.what()) + ")");
         } catch (const IndexOutOfBoundsException& e) { // Custom exception from modifier
-             throw PathNotFoundException(key, path_str + "[" + std::to_string(index) + "]", "Index out of bounds for pop: " + std::string(e.what()));
+             throw PathNotFoundException(key, path_str + "[" + std::to_string(index) + "] (Index out of bounds for pop: " + std::string(e.what()) + ")");
         } catch (const json::exception& e) { // Other json errors
             throw RedisCommandException("POP_PATH (SWSS-Client)", "Key: " + key + ", Path: " + path_str + ", JSON mod error: " + e.what());
         }
     } else { // Legacy
-        if (!_lua_script_manager) throw RedisInternalException("LuaScriptManager not initialized.");
+        if (!_lua_script_manager) throw RedisJSONException("LuaScriptManager not initialized.");
         std::vector<std::string> keys = {key};
         std::vector<std::string> args = {path_str, std::to_string(index)};
         try {
@@ -565,34 +569,30 @@ json RedisJSONClient::pop_path(const std::string& key, const std::string& path_s
             throw RedisCommandException("LUA_json_array_pop", "Key: " + key + ", Path: " + path_str + ", Error: " + e.what());
         }
     }
+    // Fallback to satisfy compiler, should be unreachable due to boolean _is_swss_mode
+    throw RedisJSONException("Internal logic error: pop_path reached end of function unexpectedly for key '" + key + "', path '" + path_str + "'.");
 }
 
 size_t RedisJSONClient::array_length(const std::string& key, const std::string& path_str) const {
     if (_is_swss_mode) {
         json doc = get_json(key); // Throws if key not found
         try {
-            // JSONModifier::get_size returns size for objects, arrays, strings.
-            // Ensure it's an array first.
-            const json* target_node = _json_modifier->navigate_to_element_const(doc, _path_parser->parse(path_str));
-            if (!target_node) {
-                 throw PathNotFoundException(key, path_str);
+            auto parsed_path = _path_parser->parse(path_str);
+            json::value_t type = _json_modifier->get_type(doc, parsed_path);
+            if (type != json::value_t::array) {
+                // Create a temporary json object of the actual type to get its name
+                throw TypeMismatchException(path_str, "array", json(type).type_name());
             }
-            if (!target_node->is_array()) {
-                throw TypeMismatchException(key, path_str, "Path does not point to an array.");
-            }
-            return target_node->size();
-            // Or, if JSONModifier::get_size is specifically for this:
-            // return _json_modifier->get_size(doc, _path_parser->parse(path_str));
-            // This assumes get_size would throw TypeMismatchException if not an array.
+            return _json_modifier->get_size(doc, parsed_path);
+        } catch (const PathNotFoundException& e){ // Path does not exist within doc or key itself not found
+            throw; // Rethrow original PathNotFoundException from get_json or get_type/get_size
         } catch (const TypeMismatchException& e){ // Path not an array
             throw;
-        } catch (const PathNotFoundException& e){ // Path does not exist within doc
-            throw;
-        } catch (const json::exception& e) { // Other json errors
+        } catch (const json::exception& e) { // Other json errors from modifier
             throw RedisCommandException("ARRAY_LENGTH (SWSS-Client)", "Key: " + key + ", Path: " + path_str + ", JSON mod error: " + e.what());
         }
     } else { // Legacy
-        if (!_lua_script_manager) throw RedisInternalException("LuaScriptManager not initialized.");
+        if (!_lua_script_manager) throw RedisJSONException("LuaScriptManager not initialized.");
         std::vector<std::string> keys = {key};
         std::vector<std::string> args = {path_str};
         try {
@@ -714,19 +714,19 @@ json RedisJSONClient::non_atomic_get_set(const std::string& key, const std::stri
         json doc = _get_document_for_modification(key); // Creates empty {} if key not found
         json old_value_at_path = json(nullptr); // Default if path doesn't exist
         try {
-            old_value_at_path = _json_modifier->get_value_at_path(doc, _path_parser->parse(path_str));
+            old_value_at_path = _json_modifier->get(doc, _path_parser->parse(path_str));
         } catch (const PathNotFoundException&) {
             // Path doesn't exist, old_value_at_path remains null. This is fine.
         }
 
         SetOptions opts; // Default set options
         // opts.create_path should be true for get_set to ensure the path is created.
-        _json_modifier->set_value_at_path(doc, _path_parser->parse(path_str), new_value, true /*create_path*/);
+        _json_modifier->set(doc, _path_parser->parse(path_str), new_value, true /*create_path*/, true /*overwrite*/);
         _set_document_after_modification(key, doc, opts);
         return old_value_at_path;
 
     } else { // Legacy mode (atomic via Lua)
-        if (!_lua_script_manager) throw RedisInternalException("LuaScriptManager not initialized.");
+        if (!_lua_script_manager) throw RedisJSONException("LuaScriptManager not initialized.");
         const std::string script_name = "atomic_json_get_set_path";
         std::vector<std::string> keys = {key};
         std::vector<std::string> args = {path_str, new_value.dump()};
@@ -754,26 +754,26 @@ bool RedisJSONClient::non_atomic_compare_set(const std::string& key, const std::
         json current_val_at_path = json(nullptr);
         bool path_existed = true;
         try {
-            current_val_at_path = _json_modifier->get_value_at_path(doc, _path_parser->parse(path_str));
+            current_val_at_path = _json_modifier->get(doc, _path_parser->parse(path_str));
         } catch (const PathNotFoundException&) {
             path_existed = false; // current_val_at_path remains null
         }
 
         if (path_existed && current_val_at_path == expected_val) {
             SetOptions opts; // Default set options
-            _json_modifier->set_value_at_path(doc, _path_parser->parse(path_str), new_val, true /*create_path*/);
+            _json_modifier->set(doc, _path_parser->parse(path_str), new_val, true /*create_path*/, true /*overwrite*/);
             _set_document_after_modification(key, doc, opts);
             return true;
         } else if (!path_existed && expected_val.is_null()) { // Path didn't exist, and we expected null (i.e. path not to exist)
             SetOptions opts;
-            _json_modifier->set_value_at_path(doc, _path_parser->parse(path_str), new_val, true /*create_path*/);
+            _json_modifier->set(doc, _path_parser->parse(path_str), new_val, true /*create_path*/, true /*overwrite*/);
             _set_document_after_modification(key, doc, opts);
             return true;
         }
         return false;
 
     } else { // Legacy
-        if (!_lua_script_manager) throw RedisInternalException("LuaScriptManager not initialized.");
+        if (!_lua_script_manager) throw RedisJSONException("LuaScriptManager not initialized.");
         const std::string script_name = "atomic_json_compare_set_path";
         std::vector<std::string> keys = {key};
         std::vector<std::string> args = {path_str, expected_val.dump(), new_val.dump()};
@@ -791,7 +791,7 @@ bool RedisJSONClient::non_atomic_compare_set(const std::string& key, const std::
 
 std::vector<std::string> RedisJSONClient::keys_by_pattern(const std::string& pattern) const {
     if (_is_swss_mode) {
-        if (!_db_connector) throw RedisInternalException("DBConnector not initialized for SWSS mode.");
+        if (!_db_connector) throw RedisJSONException("DBConnector not initialized for SWSS mode.");
         try {
             // Assuming DBConnector has a keys method that takes a pattern.
             // Standard Redis KEYS command is blocking. SCAN is preferred.
@@ -881,7 +881,8 @@ void find_json_paths_recursive(const json& current_node, const std::string& curr
             // paths_list.push_back(current_path_str); // Optional: path to empty object itself
         }
         for (auto& el : current_node.items()) {
-            std::string child_path = current_path_str + "." + _json_modifier->escape_path_segment(el.key()); // Use modifier for escaping
+            // PathParser::escape_key_if_needed is the correct static method.
+            std::string child_path = current_path_str + "." + PathParser::escape_key_if_needed(el.key());
             paths_list.push_back(child_path);
             find_json_paths_recursive(el.value(), child_path, paths_list);
         }
