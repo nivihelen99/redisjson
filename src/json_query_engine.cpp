@@ -66,6 +66,7 @@ std::vector<json> JSONQueryEngine::select(const std::string& key, const std::str
     // 3. Fetching the document and filtering it.
     // This is a major feature.
     throw NotImplementedException("SQL-like select queries are not yet implemented.");
+    return {}; // Should be unreachable, but satisfies compiler warning
 }
 
 // Aggregation
@@ -77,6 +78,7 @@ json JSONQueryEngine::aggregate(const std::string& key, const std::string& path,
     //    - `sum`, `avg`, `min`, `max`: require numerical data.
     // Lua scripts could be very beneficial here for performance.
     throw NotImplementedException("JSON aggregation is not yet implemented.");
+    return json(nullptr); // Should be unreachable, but satisfies compiler warning
 }
 
 } // namespace redisjson
