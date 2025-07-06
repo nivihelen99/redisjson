@@ -3,11 +3,13 @@
 #include "redis_connection_manager.h" // Needs access to RedisConnection or similar
 #include "exceptions.h"             // For LuaScriptException
 #include <nlohmann/json.hpp>
-#include <hiredis/hiredis.h> // Added for redisReply
+#include <hiredis/hiredis.h>
 #include <string>
 #include <vector>
 #include <unordered_map>
 #include <mutex>
+#include <iostream> // For std::cerr in implementation (temporary logging)
+#include <map> // For SCRIPT_DEFINITIONS
 
 using json = nlohmann::json;
 
@@ -86,10 +88,17 @@ private:
     // This needs to be robust for various Redis reply types (string, integer, array, nil, error).
     json redis_reply_to_json(redisReply* reply) const;
 
+    // Helper to get script body by name for on-demand loading
+    const std::string* get_script_body_by_name(const std::string& name) const;
+
     // Built-in script bodies (can be quite large)
     // These could be static const strings or loaded from files/resources.
-    static const std::string JSON_GET_SET_LUA; // Old, to be reviewed/removed if not used
-    static const std::string JSON_COMPARE_SET_LUA; // Old, to be reviewed/removed if not used
+    // static const std::string JSON_GET_SET_LUA; // Old, to be reviewed/removed if not used
+    // static const std::string JSON_COMPARE_SET_LUA; // Old, to be reviewed/removed if not used
+
+    // Map to store script definitions for on-demand loading
+    static const std::map<std::string, const std::string*> SCRIPT_DEFINITIONS;
+
     // Built-in Lua script strings
     static const std::string JSON_PATH_GET_LUA;
     static const std::string JSON_PATH_SET_LUA;

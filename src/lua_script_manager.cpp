@@ -502,6 +502,29 @@ void LuaScriptManager::load_script(const std::string& name, const std::string& s
     script_shas_[name] = sha1_hash;
 }
 
+// Initialize the static map of script definitions
+const std::map<std::string, const std::string*> LuaScriptManager::SCRIPT_DEFINITIONS = {
+    {"json_path_get", &LuaScriptManager::JSON_PATH_GET_LUA},
+    {"json_path_set", &LuaScriptManager::JSON_PATH_SET_LUA},
+    {"json_path_del", &LuaScriptManager::JSON_PATH_DEL_LUA},
+    {"json_path_type", &LuaScriptManager::JSON_PATH_TYPE_LUA},
+    {"json_array_append", &LuaScriptManager::JSON_ARRAY_APPEND_LUA},
+    {"json_array_prepend", &LuaScriptManager::JSON_ARRAY_PREPEND_LUA},
+    {"json_array_pop", &LuaScriptManager::JSON_ARRAY_POP_LUA},
+    {"json_array_length", &LuaScriptManager::JSON_ARRAY_LENGTH_LUA},
+    {"atomic_json_get_set_path", &LuaScriptManager::ATOMIC_JSON_GET_SET_PATH_LUA},
+    {"atomic_json_compare_set_path", &LuaScriptManager::ATOMIC_JSON_COMPARE_SET_PATH_LUA}
+    // Add any other scripts here if they are defined as static const std::string members
+};
+
+const std::string* LuaScriptManager::get_script_body_by_name(const std::string& name) const {
+    auto it = SCRIPT_DEFINITIONS.find(name);
+    if (it != SCRIPT_DEFINITIONS.end()) {
+        return it->second;
+    }
+    return nullptr;
+}
+
 json LuaScriptManager::redis_reply_to_json(redisReply* reply) const {
     if (!reply) return json(nullptr);
 
@@ -570,13 +593,46 @@ json LuaScriptManager::execute_script(const std::string& name,
                                     const std::vector<std::string>& keys,
                                     const std::vector<std::string>& args) {
     std::string sha1_hash;
-    {
-        std::lock_guard<std::mutex> lock(cache_mutex_);
+    bool attempted_on_demand_load = false;
+
+    // Loop to handle on-demand loading. In practice, it runs once or twice.
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        std::unique_lock<std::mutex> lock(cache_mutex_); // Use unique_lock for manual unlock/relock
         auto it = script_shas_.find(name);
-        if (it == script_shas_.end()) {
-            throw LuaScriptException(name, "Script not loaded or SHA not found in local cache. Script Name: " + name);
+        if (it != script_shas_.end()) {
+            sha1_hash = it->second;
+            break; // Found SHA, exit loop
         }
-        sha1_hash = it->second;
+
+        // SHA not found. If already tried on-demand load (i.e. attempt > 0), something is wrong.
+        if (attempt > 0) {
+            throw LuaScriptException(name, "Script SHA not found in cache even after on-demand load attempt for: " + name);
+        }
+
+        // First attempt (attempt == 0) and SHA not found: try on-demand load
+        lock.unlock(); // Unlock before calling load_script
+
+        std::cerr << "INFO: Lua script '" << name << "' not found in cache. Attempting on-demand load." << std::endl;
+        attempted_on_demand_load = true; // Mark that we are trying/tried
+        const std::string* script_body_ptr = get_script_body_by_name(name);
+
+        if (!script_body_ptr) {
+            throw LuaScriptException(name, "Script body not found for on-demand loading of script: " + name);
+        }
+
+        try {
+            load_script(name, *script_body_ptr); // This will populate script_shas_ if successful
+            std::cerr << "INFO: Successfully loaded Lua script '" << name << "' on demand." << std::endl;
+            // Loop will continue to re-acquire lock and find SHA.
+        } catch (const RedisJSONException& e) {
+            std::cerr << "ERROR: Failed to load Lua script '" << name << "' on demand: " << e.what() << std::endl;
+            throw LuaScriptException(name, "Failed to load script '" + name + "' on demand: " + std::string(e.what()));
+        }
+        // After load_script, loop iterates, re-locks and re-checks script_shas_.
+    }
+
+    if (sha1_hash.empty()) { // Should be caught by the check inside the loop if load failed
+        throw LuaScriptException(name, "Failed to obtain SHA1 for script: " + name + " after load attempts.");
     }
 
     // Use RedisConnectionPtr which includes the custom deleter
@@ -621,20 +677,47 @@ json LuaScriptManager::execute_script(const std::string& name,
 }
 
 void LuaScriptManager::preload_builtin_scripts() {
-    try {
-        load_script("json_path_get", JSON_PATH_GET_LUA);
-        load_script("json_path_set", JSON_PATH_SET_LUA);
-        load_script("json_path_del", JSON_PATH_DEL_LUA);
-        load_script("json_path_type", JSON_PATH_TYPE_LUA);
-        load_script("json_array_append", JSON_ARRAY_APPEND_LUA);
-        load_script("json_array_prepend", JSON_ARRAY_PREPEND_LUA);
-        load_script("json_array_pop", JSON_ARRAY_POP_LUA);
-        load_script("json_array_length", JSON_ARRAY_LENGTH_LUA);
-        load_script("atomic_json_get_set_path", ATOMIC_JSON_GET_SET_PATH_LUA);
-        load_script("atomic_json_compare_set_path", ATOMIC_JSON_COMPARE_SET_PATH_LUA);
-    } catch (const RedisJSONException& e) {
-        throw LuaScriptException("preload_builtin_scripts", "Failed to load a built-in script: " + std::string(e.what()));
+    // Iterate over the SCRIPT_DEFINITIONS map to preload all defined scripts.
+    // This makes it easier to manage the list of scripts to preload.
+    std::cerr << "INFO: Starting preload of built-in Lua scripts." << std::endl;
+    int success_count = 0;
+    int fail_count = 0;
+
+    for (const auto& pair : SCRIPT_DEFINITIONS) {
+        const std::string& script_name = pair.first;
+        const std::string* script_body = pair.second;
+        try {
+            // std::cerr << "DEBUG: Attempting to preload script: " << script_name << std::endl;
+            load_script(script_name, *script_body);
+            // std::cerr << "DEBUG: Successfully preloaded Lua script: " << script_name << std::endl;
+            success_count++;
+        } catch (const RedisJSONException& e) {
+            fail_count++;
+            std::cerr << "WARNING: Failed to preload Lua script '" << script_name << "' during initial preload: " << e.what()
+                      << ". Operations relying on this script may attempt on-demand load." << std::endl;
+            // Do not rethrow; allow other scripts to be preloaded.
+        } catch (const std::exception& e) { // Catch other potential standard exceptions
+            fail_count++;
+            std::cerr << "WARNING: An unexpected C++ standard error occurred while preloading Lua script '" << script_name << "': " << e.what()
+                      << ". Operations relying on this script may attempt on-demand load." << std::endl;
+        }
+        #ifndef NDEBUG // Or some other suitable debug flag
+        catch (...) { // Catch any other unknown exceptions during debug builds
+            fail_count++;
+            std::cerr << "WARNING: An unknown error occurred while preloading Lua script '" << script_name << "'."
+                      << ". Operations relying on this script may attempt on-demand load." << std::endl;
+        }
+        #endif
     }
+
+    if (fail_count > 0) {
+        std::cerr << "WARNING: Preloading completed with " << fail_count << " script(s) failing to load (out of "
+                  << SCRIPT_DEFINITIONS.size() << " total)." << std::endl;
+    } else {
+        std::cerr << "INFO: Successfully preloaded all " << success_count << " built-in Lua scripts." << std::endl;
+    }
+    // Do not throw from here, to allow client construction even if some preloads fail.
+    // The on-demand loading in execute_script will handle cases where a script is needed but failed to preload.
 }
 
 bool LuaScriptManager::is_script_loaded(const std::string& name) const {
