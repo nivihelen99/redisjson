@@ -317,7 +317,6 @@ void LuaScriptManager::preload_builtin_scripts() {
         // unless they are explicitly needed for other functionalities not covered by current TODOs.
         // load_script("json_get_set", JSON_GET_SET_LUA);
         // load_script("json_compare_set", JSON_COMPARE_SET_LUA);
-        
         // ... load other built-in scripts if any ...
         // load_script("json_merge.lua", JSON_MERGE_LUA); // Example, if a Lua based merge was needed
         // load_script("json_array_ops.lua", JSON_ARRAY_OPS_LUA); // Example
