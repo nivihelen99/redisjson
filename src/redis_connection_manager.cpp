@@ -655,9 +655,18 @@ void RedisConnectionManager::health_check_loop() {
         // Wait for the next health check interval or shutdown signal.
         // This re-acquires the mutex for the condition variable.
         std::unique_lock<std::mutex> cv_lock(pool_mutex_); 
-        if (shutting_down_ || !run_health_checker_) break;
-        condition_.wait_for(cv_lock, health_check_interval_, [this]{ return shutting_down_.load() || !run_health_checker_.load(); });
+        if (shutting_down_.load() || !run_health_checker_.load()) { // .load() for atomics
+            std::cout << "LOG: RedisConnectionManager::health_check_loop() - Breaking before wait_for. Shutting down: " << shutting_down_.load() << ", Run checker: " << run_health_checker_.load() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
+            break;
+        }
+        condition_.wait_for(cv_lock, health_check_interval_, [this]{
+            bool predicate_result = shutting_down_.load() || !run_health_checker_.load();
+            // std::cout << "LOG: RedisConnectionManager::health_check_loop() - Wait_for predicate check. Result: " << predicate_result << ". Thread ID: " << std::this_thread::get_id() << std::endl;
+            return predicate_result;
+        });
     }
+    std::cout << "LOG: RedisConnectionManager::health_check_loop() - Exited while loop. Final flags: run_health_checker_=" << run_health_checker_.load()
+              << ", shutting_down_=" << shutting_down_.load() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
 }
 
 void RedisConnectionManager::maintain_pool_size(std::unique_lock<std::mutex>& lock) {
