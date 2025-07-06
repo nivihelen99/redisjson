@@ -90,7 +90,16 @@ private:
     // These could be static const strings or loaded from files/resources.
     static const std::string JSON_GET_SET_LUA; // Old, to be reviewed/removed if not used
     static const std::string JSON_COMPARE_SET_LUA; // Old, to be reviewed/removed if not used
-    // New scripts for RedisJSON path operations
+    
+    // Built-in Lua script strings
+    static const std::string JSON_PATH_GET_LUA;
+    static const std::string JSON_PATH_SET_LUA;
+    static const std::string JSON_PATH_DEL_LUA;
+    static const std::string JSON_PATH_TYPE_LUA;
+    static const std::string JSON_ARRAY_APPEND_LUA;
+    static const std::string JSON_ARRAY_PREPEND_LUA;
+    static const std::string JSON_ARRAY_POP_LUA;
+    static const std::string JSON_ARRAY_LENGTH_LUA;
     static const std::string ATOMIC_JSON_GET_SET_PATH_LUA;
     static const std::string ATOMIC_JSON_COMPARE_SET_PATH_LUA;
     // ... other built-in scripts
