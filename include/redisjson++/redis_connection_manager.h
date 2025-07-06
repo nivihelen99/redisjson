@@ -85,8 +85,12 @@ public:
     RedisConnectionManager& operator=(const RedisConnectionManager&) = delete;
 
     // Connection Management
-    std::unique_ptr<RedisConnection> get_connection();
-    void return_connection(std::unique_ptr<RedisConnection> conn);
+    // Forward declaration for the custom deleter
+    struct RedisConnectionDeleter;
+    using RedisConnectionPtr = std::unique_ptr<RedisConnection, RedisConnectionDeleter>;
+
+    RedisConnectionPtr get_connection();
+    void return_connection(std::unique_ptr<RedisConnection> conn); // Keep this for the deleter's use
     void close_all_connections();
 
     // Health Monitoring
@@ -129,6 +133,33 @@ private:
 
     void initialize_pool();
     std::unique_ptr<RedisConnection> create_new_connection(const std::string& host, int port);
+
+public: // Made public so RedisConnectionDeleter can be defined outside but still be a nested type if desired
+    // Custom deleter for RedisConnection to be used with std::unique_ptr
+    struct RedisConnectionDeleter {
+        RedisConnectionManager* manager_ptr_ = nullptr; // Pointer to the manager to call return_connection
+
+        RedisConnectionDeleter(RedisConnectionManager* manager = nullptr) : manager_ptr_(manager) {}
+
+        void operator()(RedisConnection* conn_ptr) const {
+            if (manager_ptr_ && conn_ptr) {
+                // The return_connection method expects a unique_ptr.
+                // We construct one here temporarily to pass to return_connection.
+                // This assumes return_connection will handle the actual deletion or pooling.
+                // If conn_ptr is already managed by a unique_ptr that is going out of scope,
+                // this deleter is called. The unique_ptr `conn` given to return_connection
+                // will then manage the lifetime according to return_connection's logic.
+                manager_ptr_->return_connection(std::unique_ptr<RedisConnection>(conn_ptr));
+            } else if (conn_ptr) {
+                // If no manager is provided (e.g., standalone connection not from pool),
+                // default to deleting it. This might be undesirable if connections should always be pooled.
+                // Consider logging a warning or throwing an exception if manager_ptr_ is null
+                // and the connection was expected to be from a pool.
+                delete conn_ptr;
+            }
+        }
+    };
 };
+
 
 } // namespace redisjson
