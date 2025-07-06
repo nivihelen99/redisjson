@@ -214,6 +214,62 @@ TEST_F(LuaScriptManagerTest, ClearAllScriptsCache) {
     // And it should be flushed from server (tested implicitly if next load works or NOSCRIPT if not reloaded)
 }
 
+TEST_F(LuaScriptManagerTest, ConnectionPoolReturnsConnections) {
+    if (!live_redis_available_) GTEST_SKIP() << "Skipping test, live Redis required.";
+
+    // Configure a client with a small connection pool
+    ClientConfig small_pool_config; // Defaults to localhost:6379
+    small_pool_config.connection_pool_size = 2; // Small pool
+    RedisConnectionManager small_conn_manager(small_pool_config);
+    LuaScriptManager sm(&small_conn_manager);
+
+    const std::string script_name = "test_pool_echo";
+    // Script that returns a JSON encoded string to be compatible with execute_script
+    const std::string script_body = "return cjson.encode(ARGV[1])"; 
+
+    // Load the script once
+    ASSERT_NO_THROW(sm.load_script(script_name, script_body));
+    EXPECT_TRUE(sm.is_script_loaded(script_name));
+
+    // Call execute_script multiple times, more than the pool size
+    int num_calls = 5;
+    for (int i = 0; i < num_calls; ++i) {
+        std::vector<std::string> keys = {};
+        std::vector<std::string> args = {"Call " + std::to_string(i)};
+        json result;
+        ASSERT_NO_THROW({
+            result = sm.execute_script(script_name, keys, args);
+        }) << "Failed during execute_script call number " << i;
+        EXPECT_EQ(result.get<std::string>(), "Call " + std::to_string(i));
+    }
+
+    // Check connection stats
+    ConnectionStats stats = small_conn_manager.get_stats();
+    EXPECT_EQ(stats.active_connections, 0) << "Active connections should be 0 after operations.";
+    // Depending on exact pool behavior (e.g. creation on demand vs up front)
+    // idle_connections could be up to small_pool_config.connection_pool_size
+    // If connections are created on demand and returned, total and idle should reflect that.
+    // Let's assume the pool creates up to its max size if needed.
+    EXPECT_LE(stats.idle_connections, small_pool_config.connection_pool_size); 
+    EXPECT_GT(stats.idle_connections, 0) << "Should have at least one idle connection if pool was used.";
+    EXPECT_LE(stats.total_connections, small_pool_config.connection_pool_size);
+
+
+    // Test with clear_all_scripts_cache as well
+    ASSERT_NO_THROW(sm.clear_all_scripts_cache());
+    ConnectionStats stats_after_flush = small_conn_manager.get_stats();
+    EXPECT_EQ(stats_after_flush.active_connections, 0);
+    EXPECT_LE(stats_after_flush.idle_connections, small_pool_config.connection_pool_size);
+
+    // Test with load_script multiple times (though it's usually called once per script)
+    for (int i = 0; i < num_calls; ++i) {
+        ASSERT_NO_THROW(sm.load_script(script_name + std::to_string(i), script_body));
+    }
+    ConnectionStats stats_after_multiple_loads = small_conn_manager.get_stats();
+    EXPECT_EQ(stats_after_multiple_loads.active_connections, 0);
+    EXPECT_LE(stats_after_multiple_loads.idle_connections, small_pool_config.connection_pool_size);
+}
+
 
 // int main(int argc, char **argv) {
 //     ::testing::InitGoogleTest(&argc, argv);
