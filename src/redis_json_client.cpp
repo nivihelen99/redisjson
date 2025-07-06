@@ -2,7 +2,10 @@
 #include "redisjson++/hiredis_RAII.h" // For RedisReplyPtr
 #include "redisjson++/exceptions.h" // Added to include exception definitions
 #include <stdexcept>
-#include <string> // Required for std::to_string with some compilers/setups
+#include <string>    // Required for std::to_string with some compilers/setups
+#include <iostream>  // For std::cout (logging)
+#include <thread>    // For std::this_thread::get_id (logging)
+#include <cstring>   // For strcmp in set_json
 
 // For PathParser, JSONModifier, LuaScriptManager - include their headers once they exist
 // For now, we might not be able to fully initialize them if their constructors are complex.
@@ -18,16 +21,27 @@ RedisJSONClient::RedisJSONClient(const ClientConfig& client_config)
     _path_parser = std::make_unique<PathParser>();
     _json_modifier = std::make_unique<JSONModifier>();
     // LuaScriptManager constructor expects RedisConnectionManager*
+    // std::cout << "LOG: RedisJSONClient::RedisJSONClient() - Initializing LuaScriptManager. Thread ID: " << std::this_thread::get_id() << std::endl;
     _lua_script_manager = std::make_unique<LuaScriptManager>(_connection_manager.get());
     if (_lua_script_manager) {
+        // std::cout << "LOG: RedisJSONClient::RedisJSONClient() - Calling LuaScriptManager::preload_builtin_scripts(). Thread ID: " << std::this_thread::get_id() << std::endl;
+        // The try-catch here is less critical now since preload_builtin_scripts itself catches and logs.
+        // However, keeping it doesn't hurt, in case preload_builtin_scripts itself throws for some unforeseen reason
+        // (though it's designed not to).
         try {
             _lua_script_manager->preload_builtin_scripts();
+            // std::cout << "LOG: RedisJSONClient::RedisJSONClient() - LuaScriptManager::preload_builtin_scripts() completed. Thread ID: " << std::this_thread::get_id() << std::endl;
         } catch (const RedisJSONException& e) {
-            // Handle or log critical error during client initialization
-            // For example, throw a specific client initialization error
+            // This path should ideally not be hit if preload_builtin_scripts handles its own errors.
+            // std::cout << "ERROR_LOG: RedisJSONClient::RedisJSONClient() - Error during preload_builtin_scripts (exception caught in client constructor): " << e.what() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
             throw RedisJSONException("Failed to preload Lua scripts during RedisJSONClient construction: " + std::string(e.what()));
         }
+    } else {
+        // std::cout << "ERROR_LOG: RedisJSONClient::RedisJSONClient() - Failed to create LuaScriptManager. Thread ID: " << std::this_thread::get_id() << std::endl;
+        // Depending on policy, might throw if LuaScriptManager is critical
     }
+
+    // std::cout << "LOG: RedisJSONClient::RedisJSONClient() - Initializing other components (QueryEngine, Cache, etc.). Thread ID: " << std::this_thread::get_id() << std::endl;
     // Query engine and other components that might depend on Lua scripts or other services
     // should be initialized after their dependencies.
     _query_engine = std::make_unique<JSONQueryEngine>(*this); // If it depends on RedisJSONClient itself
