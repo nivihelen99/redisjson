@@ -51,33 +51,53 @@ RedisConnection& RedisConnection::operator=(RedisConnection&& other) noexcept {
 
 bool RedisConnection::connect() {
     if (connected_) return true;
+    last_error_message_.clear(); // Clear previous error
 
-    struct timeval tv;
-    tv.tv_sec = connect_timeout_ms_.count() / 1000;
-    tv.tv_usec = (connect_timeout_ms_.count() % 1000) * 1000;
+    // Use blocking redisConnect instead of redisConnectWithTimeout
+    context_ = redisConnect(host_.c_str(), port_);
 
-    context_ = redisConnectWithTimeout(host_.c_str(), port_, tv);
     if (context_ == nullptr || context_->err) {
         if (context_) {
-            // Optional: Log context_->errstr
+           last_error_message_ = "hiredis context error: " + std::string(context_->errstr ? context_->errstr : "Unknown error") + " (code: " + std::to_string(context_->err) + ")";
+            // The DEBUG logging for errstr content can be removed or kept as needed.
+            // For this change, I'll remove it to keep the diff focused on the blocking change.
+            // If issues persist, it can be re-added.
+            /*
+            std::string err_str_val = "Unknown error";
+            if (context_->errstr) {
+                err_str_val = std::string(context_->errstr);
+                std::cerr << "DEBUG: hiredis context->err: " << context_->err << std::endl;
+                std::cerr << "DEBUG: hiredis context->errstr: '" << err_str_val << "' (length: " << err_str_val.length() << ")" << std::endl;
+                std::cerr << "DEBUG: hiredis context->errstr (hex): ";
+                for (char c : err_str_val) {
+                    std::cerr << std::hex << static_cast<int>(static_cast<unsigned char>(c)) << " ";
+                }
+                std::cerr << std::dec << std::endl;
+            }
+            last_error_message_ = "hiredis context error: " + err_str_val + " (code: " + std::to_string(context_->err) + ")";
+            */
             redisFree(context_);
             context_ = nullptr;
+        } else {
+           last_error_message_ = "hiredis failed to allocate context";
         }
         connected_ = false;
         return false;
     }
 
-    // Set socket timeout for read/write operations (separate from connect timeout)
-    // This is crucial to prevent indefinite blocking on commands.
-    // Using the same timeout as connect for now, but could be different.
-    if (redisSetTimeout(context_, tv) != REDIS_OK) {
+    // For blocking connect, a socket timeout for commands is still important.
+    // Set socket timeout for read/write operations.
+    // We still need a timeout for commands, let's use the configured one.
+    struct timeval command_timeout_tv;
+    command_timeout_tv.tv_sec = connect_timeout_ms_.count() / 1000;
+    command_timeout_tv.tv_usec = (connect_timeout_ms_.count() % 1000) * 1000;
+
+    if (redisSetTimeout(context_, command_timeout_tv) != REDIS_OK) {
         // Log the specific error for redisSetTimeout failure
         if (context_->errstr) {
-            // Using fprintf to stderr for immediate visibility, similar to how hiredis might report errors.
-            // In a real application, a proper logging library should be used.
-            fprintf(stderr, "RedisConnection::connect: redisSetTimeout failed: %s (err code: %d)\n", context_->errstr, context_->err);
+           last_error_message_ = "redisSetTimeout failed: " + std::string(context_->errstr) + " (code: " + std::to_string(context_->err) + ")";
         } else {
-            fprintf(stderr, "RedisConnection::connect: redisSetTimeout failed with no specific error string (err code: %d).\n", context_->err);
+           last_error_message_ = "redisSetTimeout failed with no specific error string (code: " + std::to_string(context_->err) + ")";
         }
         redisFree(context_);
         context_ = nullptr;
@@ -86,6 +106,8 @@ bool RedisConnection::connect() {
     }
 
     if (!authenticate()) {
+       // Assuming authenticate might set its own more specific error or we add one here
+       if (last_error_message_.empty()) last_error_message_ = "Authentication failed";
         redisFree(context_);
         context_ = nullptr;
         connected_ = false;
@@ -93,6 +115,8 @@ bool RedisConnection::connect() {
     }
 
     if (!select_database()) {
+       // Assuming select_database might set its own more specific error
+       if (last_error_message_.empty()) last_error_message_ = "Database selection failed";
         redisFree(context_);
         context_ = nullptr;
         connected_ = false;
@@ -126,7 +150,13 @@ bool RedisConnection::authenticate() {
     }
     redisReply* reply = static_cast<redisReply*>(redisCommand(context_, "AUTH %s", password_.c_str()));
     if (reply == nullptr || reply->type == REDIS_REPLY_ERROR) {
-        // Optional: Log reply->str if error
+       if (reply && reply->str) {
+           last_error_message_ = "Authentication failed: " + std::string(reply->str);
+       } else if (context_->errstr && context_->err != 0) {
+           last_error_message_ = "Authentication failed: " + std::string(context_->errstr) + " (code: " + std::to_string(context_->err) + ")";
+       } else {
+           last_error_message_ = "Authentication failed: No reply or unknown error.";
+       }
         if (reply) freeReplyObject(reply);
         return false;
     }
@@ -140,7 +170,13 @@ bool RedisConnection::select_database() {
     }
     redisReply* reply = static_cast<redisReply*>(redisCommand(context_, "SELECT %d", database_));
     if (reply == nullptr || reply->type == REDIS_REPLY_ERROR) {
-        // Optional: Log reply->str if error
+       if (reply && reply->str) {
+           last_error_message_ = "SELECT database " + std::to_string(database_) + " failed: " + std::string(reply->str);
+       } else if (context_->errstr && context_->err != 0) {
+           last_error_message_ = "SELECT database " + std::to_string(database_) + " failed: " + std::string(context_->errstr) + " (code: " + std::to_string(context_->err) + ")";
+       } else {
+           last_error_message_ = "SELECT database " + std::to_string(database_) + " failed: No reply or unknown error.";
+       }
         if (reply) freeReplyObject(reply);
         return false;
     }
@@ -330,10 +366,13 @@ std::unique_ptr<RedisConnection> RedisConnectionManager::get_connection() {
                 return new_conn;
             } else {
                 stats_.connection_errors++;
-                // Failed to create new connection.
-                // Depending on policy, we could retry in the loop, or throw.
-                // Throwing for now, as continuous failure might indicate a bigger problem.
-                throw ConnectionException("Failed to create new connection. Host: " + config_.host + ":" + std::to_string(config_.port));
+               std::string error_detail = "Unknown connection failure.";
+               if (new_conn) { // new_conn exists but is not connected
+                   error_detail = new_conn->get_last_error();
+               } else { // new_conn itself is null, though create_new_connection always returns a unique_ptr
+                   error_detail = "Failed to allocate RedisConnection object.";
+               }
+               throw ConnectionException("Failed to create new connection to " + config_.host + ":" + std::to_string(config_.port) + ". Detail: " + error_detail);
             }
         } else {
             // This case should ideally not be reached if CV wait condition is correct and no timeouts.
