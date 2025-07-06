@@ -1,5 +1,6 @@
 #include "redisjson++/redis_json_client.h"
 #include "redisjson++/hiredis_RAII.h" // For RedisReplyPtr
+#include "redisjson++/exceptions.h" // Added to include exception definitions
 #include <stdexcept>
 #include <string> // Required for std::to_string with some compilers/setups
 
@@ -21,10 +22,10 @@ RedisJSONClient::RedisJSONClient(const ClientConfig& client_config)
     if (_lua_script_manager) {
         try {
             _lua_script_manager->preload_builtin_scripts();
-        } catch (const RedisException& e) {
+        } catch (const RedisJSONException& e) {
             // Handle or log critical error during client initialization
             // For example, throw a specific client initialization error
-            throw RedisConfigurationException("Failed to preload Lua scripts during RedisJSONClient construction: " + std::string(e.what()));
+            throw RedisJSONException("Failed to preload Lua scripts during RedisJSONClient construction: " + std::string(e.what()));
         }
     }
     // Query engine and other components that might depend on Lua scripts or other services
@@ -215,11 +216,11 @@ void RedisJSONClient::set_path(const std::string& key, const std::string& path,
     // not handled by hiredis variadic command formatting.
     // It's safer to pass it as a separate argument to conn->command.
 
-    if (opts.condition == SetCondition::NX) {
+    if (opts.condition == SetCmdCondition::NX) {
         reply = RedisReplyPtr(static_cast<redisReply*>(
             conn->command("JSON.SET %s %s %s NX", key.c_str(), path.c_str(), value_str.c_str())
         ));
-    } else if (opts.condition == SetCondition::XX) {
+    } else if (opts.condition == SetCmdCondition::XX) {
         reply = RedisReplyPtr(static_cast<redisReply*>(
             conn->command("JSON.SET %s %s %s XX", key.c_str(), path.c_str(), value_str.c_str())
         ));
@@ -391,7 +392,7 @@ void RedisJSONClient::append_path(const std::string& key, const std::string& pat
         _connection_manager->return_connection(std::move(conn));
         // This could be an error or interpreted as "operation had no effect".
         // Throwing an exception seems appropriate if the expectation is that the path should exist.
-        throw PathNotFoundException(key, path, "Key or path does not exist, or path is not an array, for JSON.ARRAPPEND");
+        throw PathNotFoundException(key, path); // Custom message ("Key or path does not exist, or path is not an array, for JSON.ARRAPPEND") omitted
     }
     
     if (reply->type == REDIS_REPLY_ARRAY) {
@@ -453,7 +454,7 @@ void RedisJSONClient::prepend_path(const std::string& key, const std::string& pa
 
     if (reply->type == REDIS_REPLY_NIL) {
         _connection_manager->return_connection(std::move(conn));
-        throw PathNotFoundException(key, path, "Key or path does not exist for JSON.ARRINSERT");
+        throw PathNotFoundException(key, path); // Custom message ("Key or path does not exist for JSON.ARRINSERT") omitted
     }
 
     if (reply->type == REDIS_REPLY_ARRAY) {
@@ -558,7 +559,7 @@ size_t RedisJSONClient::array_length(const std::string& key, const std::string& 
         _connection_manager->return_connection(std::move(conn));
         // PathNotFoundException or a more specific "not an array" or "length cannot be determined"
         // Throwing PathNotFound is reasonable if the path doesn't lead to an array whose length can be determined.
-        throw PathNotFoundException(key, path, "Key or path does not exist, or path is not an array, for JSON.ARRLEN");
+        throw PathNotFoundException(key, path); // Custom message ("Key or path does not exist, or path is not an array, for JSON.ARRLEN") omitted
     }
 
     if (reply->type == REDIS_REPLY_INTEGER) {
@@ -584,7 +585,7 @@ size_t RedisJSONClient::array_length(const std::string& key, const std::string& 
         } else if (element_reply->type == REDIS_REPLY_NIL) {
             // Path specified, but it's not an array (or doesn't exist at that specific sub-path)
              _connection_manager->return_connection(std::move(conn));
-            throw PathNotFoundException(key, path, "Path exists but is not an array, or sub-path not found, for JSON.ARRLEN (array reply)");
+            throw PathNotFoundException(key, path); // Custom message ("Path exists but is not an array, or sub-path not found, for JSON.ARRLEN (array reply)") omitted
         }
     }
 
@@ -683,7 +684,7 @@ void RedisJSONClient::patch_json(const std::string& key, const json& patch_opera
                                       // For now, let's assume "patching a non-existent doc" means starting from `{}`.
                                       // This behavior might need refinement based on desired semantics.
                                       // A safer default if key not found might be to throw, unless patch is a single "add" to "/"
-    } catch (const RedisException& e) { // Catch other Redis specific exceptions from get_json
+    } catch (const RedisJSONException& e) { // Catch other Redis specific exceptions from get_json
         throw; // Rethrow other potentially critical errors from get_json
     }
 
@@ -695,7 +696,7 @@ void RedisJSONClient::patch_json(const std::string& key, const json& patch_opera
     } catch (const json::exception& e) {
         // This could be json::parse_error if patch_operations is malformed,
         // or json::out_of_range / json::type_error if patch operations are invalid for the current_doc.
-        throw JsonPatchException("Failed to apply JSON Patch for key '" + key + "': " + e.what());
+        throw PatchFailedException("Failed to apply JSON Patch for key '" + key + "': " + e.what());
     }
 
     // 3. Set the patched document back to Redis
@@ -704,7 +705,7 @@ void RedisJSONClient::patch_json(const std::string& key, const json& patch_opera
         // If TTL was associated with the key, it will be cleared by set_json unless set_json is modified
         // or we fetch TTL and re-apply. For simplicity, this basic patch doesn't manage TTL explicitly.
         set_json(key, patched_doc);
-    } catch (const RedisException& e) {
+     } catch (const RedisJSONException& e) {
         // Catch Redis specific exceptions from set_json
         throw; // Rethrow
     }
@@ -715,7 +716,7 @@ void RedisJSONClient::patch_json(const std::string& key, const json& patch_opera
 json RedisJSONClient::atomic_get_set(const std::string& key, const std::string& path,
                                      const json& new_value) {
     if (!_lua_script_manager) {
-        throw RedisConfigurationException("LuaScriptManager is not initialized.");
+        throw RedisJSONException("LuaScriptManager is not initialized.");
     }
 
     // Script name expected to be loaded by LuaScriptManager
@@ -745,18 +746,21 @@ json RedisJSONClient::atomic_get_set(const std::string& key, const std::string& 
 
     } catch (const LuaScriptException& e) {
         // More specific error context
-        throw RedisLuaScriptException("Error executing atomic_get_set script for key '" + key + "', path '" + path + "': " + e.what());
+        throw LuaScriptException(script_name, "Error executing atomic_get_set script for key '" + key + "', path '" + path + "': " + e.what());
     } catch (const JsonParsingException& e) {
-        throw RedisLuaScriptException("Failed to parse result from atomic_get_set script for key '" + key + "', path '" + path + "': " + e.what());
-    } catch (const RedisException& e) { // Catch other Redis specific exceptions
+        throw LuaScriptException(script_name, "Failed to parse result from atomic_get_set script for key '" + key + "', path '" + path + "': " + e.what());
+    } catch (const RedisJSONException& e) { // Catch other Redis specific exceptions
         throw; // Rethrow
     }
+    // Should be unreachable if all exceptions from execute_script are RedisJSONExceptions
+    // or derived from it, or LuaScriptException. Adding throw to satisfy compiler.
+    throw RedisJSONException("Unknown error in atomic_get_set after Lua script execution attempt.");
 }
 
 bool RedisJSONClient::atomic_compare_set(const std::string& key, const std::string& path,
                                         const json& expected, const json& new_value) {
     if (!_lua_script_manager) {
-        throw RedisConfigurationException("LuaScriptManager is not initialized.");
+        throw RedisJSONException("LuaScriptManager is not initialized.");
     }
 
     const std::string script_name = "atomic_json_compare_set_path";
@@ -774,14 +778,16 @@ bool RedisJSONClient::atomic_compare_set(const std::string& key, const std::stri
             return result_json.get<int>() == 1;
         } else {
             // Should not happen if script behaves correctly.
-            throw RedisLuaScriptException("Atomic compare-and-set script '" + script_name + "' for key '" + key + "', path '" + path +
-                                          "' returned non-integer result: " + result_json.dump());
+            throw LuaScriptException(script_name, "Atomic compare-and-set script '" + script_name + "' for key '" + key + "', path '" + path + "' returned non-integer result: " + result_json.dump());
         }
     } catch (const LuaScriptException& e) {
-        throw RedisLuaScriptException("Error executing atomic_compare_set script for key '" + key + "', path '" + path + "': " + e.what());
-    } catch (const RedisException& e) { // Catch other Redis specific exceptions
+        throw LuaScriptException(script_name, "Error executing atomic_compare_set script for key '" + key + "', path '" + path + "': " + e.what());
+    } catch (const RedisJSONException& e) { // Catch other Redis specific exceptions
         throw; // Rethrow
     }
+    // Should be unreachable if all exceptions from execute_script are RedisJSONExceptions
+    // or derived from it, or LuaScriptException. Adding throw to satisfy compiler.
+    throw RedisJSONException("Unknown error in atomic_compare_set after Lua script execution attempt.");
 }
 
 // --- Utility Operations ---
@@ -875,7 +881,7 @@ json RedisJSONClient::search_by_value(const std::string& key, const json& search
     } catch (const PathNotFoundException& e) {
         // If the key doesn't exist, there's nothing to search.
         return json::array(); // Return an empty JSON array
-    } catch (const RedisException& e) {
+    } catch (const RedisJSONException& e) {
         throw; // Rethrow other Redis-related exceptions
     }
 
@@ -933,7 +939,7 @@ std::vector<std::string> RedisJSONClient::get_all_paths(const std::string& key) 
     } catch (const PathNotFoundException& e) {
         // Key does not exist, so no paths.
         return {};
-    } catch (const RedisException& e) {
+    } catch (const RedisJSONException& e) {
         throw; // Rethrow other Redis-related errors
     }
 

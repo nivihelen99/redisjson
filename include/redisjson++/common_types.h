@@ -23,6 +23,13 @@ struct ClientConfig {
     bool enable_tcp_keepalives = true;
     std::uint16_t tcp_keepalive_time_sec = 60; // Time in seconds for TCP keepalive
 
+// Enum for SET command conditions (NX, XX)
+enum class SetCmdCondition {
+    NONE, // No condition
+    NX,   // Set only if key does not exist
+    XX    // Set only if key already exists
+};
+
     // Retry strategy (basic example)
     int max_retries = 3;
     std::chrono::milliseconds retry_backoff_start = std::chrono::milliseconds(100);
@@ -41,6 +48,7 @@ struct SetOptions {
     bool create_path = true;        // For path-specific operations (not used by current set_json)
     bool overwrite = true;          // For Redis SET, this is implicit. For JSON specific ops, might differ.
     std::chrono::seconds ttl = std::chrono::seconds(0); // TTL (0 = no expiry)
+    SetCmdCondition condition = SetCmdCondition::NONE; // Conditional set (NX, XX)
     // bool compress = false;          // Future feature
     // bool validate_schema = false;   // Future feature
     // std::string schema_name = "";   // Future feature
