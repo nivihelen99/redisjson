@@ -226,7 +226,7 @@ TEST_F(RedisJSONClientTest, SetAndGetPath) {
 
     // Test set_path with NX (should succeed as path $.newfield does not exist)
     redisjson::SetOptions opts_nx;
-    opts_nx.condition = redisjson::SetCondition::NX;
+    opts_nx.condition = redisjson::SetCmdCondition::NX;
     json new_field_val = "new value";
     ASSERT_NO_THROW(client->set_path(key, "$.newfield", new_field_val, opts_nx));
     json new_field_ret_array;
@@ -243,7 +243,7 @@ TEST_F(RedisJSONClientTest, SetAndGetPath) {
 
     // Test set_path with XX (should succeed as path $.newfield exists)
     redisjson::SetOptions opts_xx;
-    opts_xx.condition = redisjson::SetCondition::XX;
+    opts_xx.condition = redisjson::SetCmdCondition::XX;
     ASSERT_NO_THROW(client->set_path(key, "$.newfield", newer_field_val, opts_xx));
     ASSERT_NO_THROW(new_field_ret_array = client->get_path(key, "$.newfield"));
     ASSERT_TRUE(new_field_ret_array.is_array() && new_field_ret_array.size() == 1);
