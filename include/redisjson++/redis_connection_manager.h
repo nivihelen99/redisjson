@@ -59,6 +59,7 @@ public:
 
     std::chrono::steady_clock::time_point last_used_time;
     bool ping(); // Send PING to check health
+    const std::string& get_last_error() const { return last_error_message_; }
 
 private:
     std::string host_;
@@ -68,6 +69,7 @@ private:
     std::chrono::milliseconds connect_timeout_ms_;
     redisContext* context_ = nullptr;
     bool connected_ = false;
+    std::string last_error_message_;
 
     bool authenticate();
     bool select_database();
