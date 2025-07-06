@@ -7,6 +7,13 @@
 
 namespace redisjson {
 
+// Enum for SET command conditions (NX, XX)
+enum class SetCmdCondition {
+    NONE, // No condition
+    NX,   // Set only if key does not exist
+    XX    // Set only if key already exists
+};
+
 // Configuration for the Redis client and connection manager
 struct ClientConfig {
     std::string host = "127.0.0.1";
@@ -22,13 +29,6 @@ struct ClientConfig {
     std::chrono::seconds connection_max_idle_time = std::chrono::seconds(300); // Max time a connection can be idle before being potentially closed
     bool enable_tcp_keepalives = true;
     std::uint16_t tcp_keepalive_time_sec = 60; // Time in seconds for TCP keepalive
-
-// Enum for SET command conditions (NX, XX)
-enum class SetCmdCondition {
-    NONE, // No condition
-    NX,   // Set only if key does not exist
-    XX    // Set only if key already exists
-};
 
     // Retry strategy (basic example)
     int max_retries = 3;
