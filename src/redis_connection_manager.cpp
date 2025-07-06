@@ -71,7 +71,14 @@ bool RedisConnection::connect() {
     // This is crucial to prevent indefinite blocking on commands.
     // Using the same timeout as connect for now, but could be different.
     if (redisSetTimeout(context_, tv) != REDIS_OK) {
-        // Optional: Log error
+        // Log the specific error for redisSetTimeout failure
+        if (context_->errstr) {
+            // Using fprintf to stderr for immediate visibility, similar to how hiredis might report errors.
+            // In a real application, a proper logging library should be used.
+            fprintf(stderr, "RedisConnection::connect: redisSetTimeout failed: %s (err code: %d)\n", context_->errstr, context_->err);
+        } else {
+            fprintf(stderr, "RedisConnection::connect: redisSetTimeout failed with no specific error string (err code: %d).\n", context_->err);
+        }
         redisFree(context_);
         context_ = nullptr;
         connected_ = false;
