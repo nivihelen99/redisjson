@@ -44,6 +44,7 @@ RedisJSON++ is a high-performance C++17 library that provides native JSON manipu
 - [Dependencies](#dependencies)
 - [Contributing](#contributing)
 - [License](#license)
+- [Project Structure](#project-structure)
 
 ## Installation
 
@@ -422,6 +423,28 @@ Please check if a `CONTRIBUTING.md` file exists for more detailed guidelines.
 
 This project is licensed under the **MIT License**.
 A copy of the MIT License is typically included in a `LICENSE` or `LICENSE.md` file in the root of the repository. (The `docs/requirement.md` specifies MIT License).
+
+---
+
+## Project Structure
+
+The repository is organized as follows:
+
+- **`.github/`**: Contains GitHub Actions workflow configurations for CI.
+- **`CMakeLists.txt`**: The main CMake build script for the project.
+- **`README.md`**: This file, providing an overview of the project.
+- **`README_swss.md`**: Specific README for SWSS integration.
+- **`docs/`**: Contains detailed documentation.
+  - `design.md`: Software design document.
+  - `lua_design.md`: Design details for Lua scripting.
+  - `requirement.md`: Project requirements and API specifications.
+- **`examples/`**: Contains sample code demonstrating how to use the library.
+  - `sample.cpp`: A general example showcasing various features of RedisJSON++.
+  - `sample_swss.cpp`: An example demonstrating integration with SWSS.
+- **`include/redisjson++/`**: Contains all public header files for the library. This is the primary interface for users of RedisJSON++.
+- **`src/`**: Contains the C++ source code implementation of the library.
+- **`tests/`**: Contains unit and integration tests for the library, built using GoogleTest.
+- **`thirdparty/`**: Contains third-party dependencies included directly in the repository (e.g., `nlohmann/json.hpp`).
 
 ---
 
