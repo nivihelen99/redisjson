@@ -376,10 +376,10 @@ void run_sparse_merge_operations(redisjson::RedisJSONClient& client) {
         std::cout << "\nAttempting set_json_sparse with non-object input (expected to fail):" << std::endl;
         client.set_json_sparse(merge_key, non_object_input);
         std::cerr << "ERROR: set_json_sparse with non-object input did not throw as expected." << std::endl;
-    } catch (const redisjson::InvalidInputException& e) {
-        std::cout << "SUCCESS: Caught expected InvalidInputException for non-object input: " << e.what() << std::endl;
-    } catch (const redisjson::RedisJSONException& e) {
-        std::cout << "SUCCESS: Caught RedisJSONException for non-object input (as expected by Lua script error): " << e.what() << std::endl;
+    } catch (const redisjson::ArgumentInvalidException& e) { // Corrected Type
+        std::cout << "SUCCESS: Caught expected ArgumentInvalidException for non-object input: " << e.what() << std::endl;
+    } catch (const redisjson::RedisJSONException& e) { // General fallback
+        std::cout << "SUCCESS: Caught RedisJSONException for non-object input: " << e.what() << std::endl;
     }
 
 
@@ -390,10 +390,10 @@ void run_sparse_merge_operations(redisjson::RedisJSONClient& client) {
         std::cout << "\nAttempting set_json_sparse into an existing array (expected to fail):" << std::endl;
         client.set_json_sparse(array_key, {{"field", "value"}});
         std::cerr << "ERROR: set_json_sparse into an existing array did not throw as expected." << std::endl;
-    } catch (const redisjson::RedisOperationException& e) {
-         std::cout << "SUCCESS: Caught expected RedisOperationException for merge into array: " << e.what() << std::endl;
-    } catch (const redisjson::RedisJSONException& e) { // Broader catch if specific exception changes
-         std::cout << "SUCCESS: Caught RedisJSONException for merge into array (as expected by Lua script error): " << e.what() << std::endl;
+    } catch (const redisjson::LuaScriptException& e) { // Corrected Type: Lua script will error out
+         std::cout << "SUCCESS: Caught expected LuaScriptException for merge into array: " << e.what() << std::endl;
+    } catch (const redisjson::RedisJSONException& e) { // Broader catch
+         std::cout << "SUCCESS: Caught RedisJSONException for merge into array: " << e.what() << std::endl;
     }
 
 
