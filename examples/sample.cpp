@@ -302,6 +302,107 @@ void run_atomic_operations(redisjson::RedisJSONClient& client) {
     client.del_json(atomic_key);
 }
 
+void run_sparse_merge_operations(redisjson::RedisJSONClient& client) {
+    print_header("Sparse Merge Operations (set_json_sparse)");
+    std::string merge_key = "sample:sparse:user_settings";
+
+    // 1. Initial document setup
+    json initial_settings = {
+        {"username", "biff_carson"},
+        {"theme", "light"},
+        {"notifications", {
+            {"email", true},
+            {"sms", false}
+        }},
+        {"language", "en"}
+    };
+    try {
+        client.set_json(merge_key, initial_settings);
+        std::cout << "Setup: Initial document for key '" << merge_key << "':\n"
+                  << client.get_json(merge_key).dump(2) << std::endl;
+    } catch (const redisjson::RedisJSONException& e) {
+        std::cerr << "ERROR: Initial SET for sparse merge demo: " << e.what() << std::endl;
+        return; // Cannot proceed if setup fails
+    }
+
+    // 2. Perform a sparse merge to update and add fields
+    json sparse_update = {
+        {"theme", "dark"}, // Update existing
+        {"notifications", { // Overwrite nested object
+            {"email", true},
+            {"sms", true},
+            {"push", false}
+        }},
+        {"new_feature_flag", true} // Add new field
+    };
+    try {
+        bool success = client.set_json_sparse(merge_key, sparse_update);
+        std::cout << "\nSUCCESS: Called set_json_sparse. Result: " << (success ? "true" : "false") << std::endl;
+        std::cout << "Document after sparse merge:\n"
+                  << client.get_json(merge_key).dump(2) << std::endl;
+        // Verification:
+        // - theme should be "dark"
+        // - language should still be "en"
+        // - notifications should be the new object
+        // - new_feature_flag should be true
+    } catch (const redisjson::RedisJSONException& e) {
+        std::cerr << "ERROR: set_json_sparse on existing key: " << e.what() << std::endl;
+    }
+
+    // 3. Perform sparse merge on a non-existent key (should create it)
+    std::string new_merge_key = "sample:sparse:new_doc";
+    json new_doc_data = {
+        {"service_name", "alpha_service"},
+        {"status", "pending"}
+    };
+    try {
+        // Ensure key is deleted if it exists from a previous run
+        try { client.del_json(new_merge_key); } catch (...) {}
+
+        bool success = client.set_json_sparse(new_merge_key, new_doc_data);
+        std::cout << "\nSUCCESS: Called set_json_sparse on new key '" << new_merge_key << "'. Result: " << (success ? "true" : "false") << std::endl;
+        std::cout << "Document after sparse merge on new key:\n"
+                  << client.get_json(new_merge_key).dump(2) << std::endl;
+        if (client.get_json(new_merge_key) != new_doc_data) {
+            std::cerr << "VERIFICATION ERROR: Document created by sparse merge differs from input!" << std::endl;
+        }
+    } catch (const redisjson::RedisJSONException& e) {
+        std::cerr << "ERROR: set_json_sparse on new key: " << e.what() << std::endl;
+    }
+
+    // 4. Attempt sparse merge with non-object input (should fail or be handled by client method)
+    json non_object_input = json::array({"this", "is", "not", "an", "object"});
+    try {
+        std::cout << "\nAttempting set_json_sparse with non-object input (expected to fail):" << std::endl;
+        client.set_json_sparse(merge_key, non_object_input);
+        std::cerr << "ERROR: set_json_sparse with non-object input did not throw as expected." << std::endl;
+    } catch (const redisjson::ArgumentInvalidException& e) { // Corrected Type
+        std::cout << "SUCCESS: Caught expected ArgumentInvalidException for non-object input: " << e.what() << std::endl;
+    } catch (const redisjson::RedisJSONException& e) { // General fallback
+        std::cout << "SUCCESS: Caught RedisJSONException for non-object input: " << e.what() << std::endl;
+    }
+
+
+    // 5. Attempt sparse merge into an existing array (should fail)
+    std::string array_key = "sample:sparse:existing_array";
+    try {
+        client.set_json(array_key, json::array({"one", "two"}));
+        std::cout << "\nAttempting set_json_sparse into an existing array (expected to fail):" << std::endl;
+        client.set_json_sparse(array_key, {{"field", "value"}});
+        std::cerr << "ERROR: set_json_sparse into an existing array did not throw as expected." << std::endl;
+    } catch (const redisjson::LuaScriptException& e) { // Corrected Type: Lua script will error out
+         std::cout << "SUCCESS: Caught expected LuaScriptException for merge into array: " << e.what() << std::endl;
+    } catch (const redisjson::RedisJSONException& e) { // Broader catch
+         std::cout << "SUCCESS: Caught RedisJSONException for merge into array: " << e.what() << std::endl;
+    }
+
+
+    // Cleanup
+    try { client.del_json(merge_key); } catch (...) {}
+    try { client.del_json(new_merge_key); } catch (...) {}
+    try { client.del_json(array_key); } catch (...) {}
+}
+
 
 int main() {
     // --- Non-SWSS Mode / Legacy Mode Example ---
@@ -335,6 +436,7 @@ int main() {
         run_array_operations(legacy_client);
         run_array_operations_extended(legacy_client); // Added extended array operations
         run_atomic_operations(legacy_client); // Original atomic operations using Lua
+        run_sparse_merge_operations(legacy_client); // <--- Added new demo
 
         print_header("Non-SWSS (Legacy) Mode Sample Program Finished");
 

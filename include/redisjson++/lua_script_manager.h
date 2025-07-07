@@ -110,6 +110,7 @@ private:
     static const std::string JSON_ARRAY_LENGTH_LUA;
     static const std::string ATOMIC_JSON_GET_SET_PATH_LUA;
     static const std::string ATOMIC_JSON_COMPARE_SET_PATH_LUA;
+    static const std::string JSON_SPARSE_MERGE_LUA; // Added declaration
     // ... other built-in scripts
 };
 

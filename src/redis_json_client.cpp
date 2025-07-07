@@ -787,6 +787,63 @@ bool RedisJSONClient::non_atomic_compare_set(const std::string& key, const std::
     }
 }
 
+bool RedisJSONClient::set_json_sparse(const std::string& key, const json& sparse_json_object) {
+    if (_is_swss_mode) {
+        // For SWSS mode, this would be a client-side get-merge-set.
+        // The request is to implement this for non-SWSS mode using Lua.
+        throw NotImplementedException("set_json_sparse for SWSS mode is not implemented with atomicity. Use non-SWSS mode for Lua script execution.");
+    } else {
+        if (!_lua_script_manager) {
+            throw RedisJSONException("LuaScriptManager not initialized for set_json_sparse.");
+        }
+        if (!sparse_json_object.is_object()) {
+            // This check ensures that we are trying to merge an object.
+            // The Lua script also validates this, but client-side check is good.
+            throw ArgumentInvalidException("Input sparse_json_object must be a JSON object for set_json_sparse.");
+        }
+        try {
+            std::string sparse_json_str = sparse_json_object.dump();
+            json result = _lua_script_manager->execute_script(
+                "json_sparse_merge", // Script name defined in LuaScriptManager
+                {key},               // KEYS[1]
+                {sparse_json_str}    // ARGV[1]
+            );
+
+            // The Lua script `json_sparse_merge` is designed to return:
+            // - 1 on success.
+            // - Error reply (which LuaScriptManager converts to LuaScriptException) on failure.
+            if (result.is_number() && result.get<int>() == 1) {
+                return true;
+            } else {
+                // This case should ideally not be reached if the Lua script strictly returns 1 or throws an error.
+                // If it's reached, it means the script returned something unexpected without erroring in Redis.
+                // Example: Lua script returns `false` or `nil` directly instead of `redis.error_reply()`.
+                // We'll treat such cases as a general failure of the operation.
+                throw RedisJSONException("Lua script 'json_sparse_merge' for key '" + key + "' returned an unexpected result: " + result.dump());
+            }
+        } catch (const LuaScriptException& e) {
+            // Re-throw to propagate Lua script errors (e.g., ERR_DECODE_ARG, ERR_EXISTING_TYPE)
+            throw;
+        } catch (const JsonParsingException& e) {
+            // Error during sparse_json_object.dump()
+            throw; // Re-throw, already specific enough
+        } catch (const RedisJSONException& e) {
+            // Catch other potential RedisJSON exceptions from execute_script (e.g., connection issues)
+            throw RedisJSONException("Error during set_json_sparse for key '" + key + "': " + e.what());
+        }
+        // Fallback, though ideally try/catch should handle all returns/throws.
+        // This addresses the -Wreturn-type warning if any path through try/catch isn't covered.
+        // However, the logic above (throwing or returning true) should cover all paths from `try`.
+        // If an unexpected std::exception (not RedisJSONException) occurs, it would propagate.
+    }
+    // This line should ideally be unreachable if the logic within the else block is complete.
+    // If _is_swss_mode is false, the code must enter the else block.
+    // The else block should either return true or throw an exception.
+    // Adding a "return false;" here to satisfy the compiler if it can't deduce full coverage,
+    // but it indicates a potential logic flaw if ever reached.
+    return false;
+}
+
 // --- Utility Operations ---
 
 std::vector<std::string> RedisJSONClient::keys_by_pattern(const std::string& pattern) const {
