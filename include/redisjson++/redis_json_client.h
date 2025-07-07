@@ -87,6 +87,24 @@ public:
     bool exists_json(const std::string& key) const;
     void del_json(const std::string& key);
 
+    /**
+     * @brief Merges a JSON object into an existing JSON document at the specified key (non-SWSS mode uses Lua script).
+     * If the key does not exist, a new document is created with the content of sparse_json_object.
+     * If the key exists and holds a JSON object, the fields from sparse_json_object are merged into it.
+     * Existing fields in the document that are not present in sparse_json_object are preserved.
+     * Fields in sparse_json_object will overwrite existing fields in the document.
+     * This is a shallow merge operation on the top-level keys of sparse_json_object.
+     *
+     * In SWSS mode, this operation would be client-side (get, merge, set) and lose atomicity.
+     * The primary implementation target for this feature is non-SWSS mode using Lua.
+     *
+     * @param key The Redis key where the JSON document is stored.
+     * @param sparse_json_object A nlohmann::json object containing the fields to merge. Must be a JSON object.
+     * @throws RedisJSONException if the operation fails (e.g., existing value is not an object, input is not an object, Redis error).
+     * @return true if the Lua script reports success (typically 1), false otherwise. Specific error details are through exceptions.
+     */
+    bool set_json_sparse(const std::string& key, const json& sparse_json_object);
+
     // Path Operations (will be client-side get-modify-set, atomicity lost)
     json get_path(const std::string& key, const std::string& path) const;
     void set_path(const std::string& key, const std::string& path,

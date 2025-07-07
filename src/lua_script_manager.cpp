@@ -467,6 +467,111 @@ const std::string LuaScriptManager::ATOMIC_JSON_COMPARE_SET_PATH_LUA = LUA_COMMO
     end
 )lua";
 
+const std::string LuaScriptManager::JSON_SPARSE_MERGE_LUA = R"lua(
+    local key = KEYS[1]
+    local changes_json_str = ARGV[1]
+
+    local changes_doc, err_changes = cjson.decode(changes_json_str)
+    if not changes_doc then
+        return redis.error_reply('ERR_DECODE_ARG Invalid JSON in changes argument: ' .. (err_changes or 'unknown error'))
+    end
+    if type(changes_doc) ~= 'table' then
+        return redis.error_reply('ERR_ARG_TYPE Changes argument must be a JSON object')
+    end
+    -- Ensure it's not an array-like table if cjson.decode might produce one for top-level array string
+    local changes_is_object = false
+    if next(changes_doc) == nil then -- Empty table could be object {}
+        changes_is_object = true
+    else
+        for k, _ in pairs(changes_doc) do
+            if type(k) ~= 'number' then
+                changes_is_object = true
+                break
+            end
+        end
+        -- If all keys are numbers, it might still be an object like {1: "val"}
+        -- A simple heuristic: if it has non-numeric keys, it's an object.
+        -- If all keys are numeric and sequential from 1, it's likely an array.
+        -- For this merge, we strictly expect an object. If cjson decodes `[]` to a table with numeric keys 1..N,
+        -- we should reject it.
+        if not changes_is_object then -- Still could be an array
+            local max_idx = 0
+            local count = 0
+            for k, _ in pairs(changes_doc) do
+                if type(k) == 'number' and k >= 1 and math.floor(k) == k then
+                    if k > max_idx then max_idx = k end
+                    count = count + 1
+                else
+                    changes_is_object = true -- Found a non-numeric key
+                    break
+                end
+            end
+            if not changes_is_object and count > 0 and max_idx == count then -- It's a dense array
+                 return redis.error_reply('ERR_ARG_TYPE Changes argument must be a JSON object, not an array')
+            elseif not changes_is_object and count == 0 and max_idx == 0 then -- Empty table is fine as an object {}
+                 changes_is_object = true
+            elseif not changes_is_object and count > 0 and max_idx ~= count then -- Sparse array like table, treat as object
+                 changes_is_object = true
+            end
+        end
+    end
+    if not changes_is_object then
+        return redis.error_reply('ERR_ARG_TYPE Changes argument must be a JSON object, not an array (final check)')
+    end
+
+    local current_json_str = redis.call('GET', key)
+    local current_doc
+
+    if not current_json_str then
+        -- Key doesn't exist, so the changes_doc becomes the new document
+        current_doc = changes_doc
+    else
+        local err_current
+        current_doc, err_current = cjson.decode(current_json_str)
+        if not current_doc then
+            return redis.error_reply('ERR_DECODE_EXISTING Invalid JSON in existing key ' .. key .. ': ' .. (err_current or 'unknown error'))
+        end
+        if type(current_doc) ~= 'table' then
+             return redis.error_reply('ERR_EXISTING_TYPE Existing value at key ' .. key .. ' is not a JSON object, cannot merge.')
+        end
+
+        local current_is_object = false
+        if next(current_doc) == nil then current_is_object = true else
+            for k, _ in pairs(current_doc) do
+                if type(k) ~= 'number' then current_is_object = true; break; end
+            end
+            if not current_is_object then -- Still could be an array
+                local max_idx = 0; local count = 0
+                for k, _ in pairs(current_doc) do
+                    if type(k) == 'number' and k >= 1 and math.floor(k) == k then
+                        if k > max_idx then max_idx = k end; count = count + 1
+                    else current_is_object = true; break; end
+                end
+                if not current_is_object and count > 0 and max_idx == count then
+                     return redis.error_reply('ERR_EXISTING_TYPE Existing value at key ' .. key .. ' is a JSON array, cannot merge object fields.')
+                elseif not current_is_object and count == 0 and max_idx == 0 then current_is_object = true
+                elseif not current_is_object and count > 0 and max_idx ~= count then current_is_object = true; end
+            end
+        end
+        if not current_is_object then
+             return redis.error_reply('ERR_EXISTING_TYPE Existing value at key ' .. key .. ' is a JSON array, cannot merge object fields (final check).')
+        end
+
+        -- Perform the shallow merge
+        for k, v in pairs(changes_doc) do
+            current_doc[k] = v
+        end
+    end
+
+    local new_doc_json_str, err_encode = cjson.encode(current_doc)
+    if not new_doc_json_str then
+        return redis.error_reply('ERR_ENCODE Failed to encode merged document: ' .. (err_encode or 'unknown error'))
+    end
+
+    redis.call('SET', key, new_doc_json_str)
+    return 1 -- Success
+)lua";
+
 LuaScriptManager::LuaScriptManager(RedisConnectionManager* conn_manager)
     : connection_manager_(conn_manager) {
     if (!conn_manager) {
@@ -560,8 +665,9 @@ const std::map<std::string, const std::string*> LuaScriptManager::SCRIPT_DEFINIT
     {"json_array_pop", &LuaScriptManager::JSON_ARRAY_POP_LUA},
     {"json_array_length", &LuaScriptManager::JSON_ARRAY_LENGTH_LUA},
     {"json_get_set", &LuaScriptManager::ATOMIC_JSON_GET_SET_PATH_LUA}, // Renamed from atomic_json_get_set_path
-    {"json_compare_set", &LuaScriptManager::ATOMIC_JSON_COMPARE_SET_PATH_LUA} // Renamed from atomic_json_compare_set_path
+    {"json_compare_set", &LuaScriptManager::ATOMIC_JSON_COMPARE_SET_PATH_LUA}, // Renamed from atomic_json_compare_set_path
     // Add any other scripts here if they are defined as static const std::string members
+    {"json_sparse_merge", &LuaScriptManager::JSON_SPARSE_MERGE_LUA}
 };
 
 const std::string* LuaScriptManager::get_script_body_by_name(const std::string& name) const {
