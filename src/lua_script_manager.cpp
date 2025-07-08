@@ -642,7 +642,13 @@ for k, v in pairs(target_object) do
 end
 
 -- Return the keys as a JSON array string
-return cjson.encode(keys_array)
+-- If keys_array is empty, cjson.encode({}) might produce "{}" (empty object)
+-- which is not what we want. We need "[]" (empty array).
+if #keys_array == 0 then
+    return "[]"
+else
+    return cjson.encode(keys_array)
+end
 )lua";
 
 LuaScriptManager::LuaScriptManager(RedisConnectionManager* conn_manager)
