@@ -651,6 +651,70 @@ else
 end
 )lua";
 
+const std::string LuaScriptManager::JSON_NUMINCRBY_LUA = LUA_COMMON_HELPERS + R"lua(
+    local key = KEYS[1]
+    local path_str = ARGV[1]
+    local increment_by_str = ARGV[2]
+
+    if path_str == '$' or path_str == '' then
+        return redis.error_reply('ERR_PATH path cannot be root for NUMINCRBY')
+    end
+
+    local current_json_str = redis.call('GET', key)
+    if not current_json_str then
+        return redis.error_reply('ERR_NOKEY key ' .. key .. ' does not exist')
+    end
+
+    local current_doc, err_decode = cjson.decode(current_json_str)
+    if not current_doc then
+        return redis.error_reply('ERR_DECODE Failed to decode JSON for key ' .. key .. ': ' .. (err_decode or 'unknown error'))
+    end
+
+    local path_segments = parse_path(path_str)
+    if path_segments == nil or (type(path_segments) == 'table' and path_segments.err) then
+         return redis.error_reply('ERR_PATH Invalid path string: ' .. path_str .. (path_segments.err or ''))
+    end
+    if #path_segments == 0 then -- Should be caught by root check above, but as safeguard
+        return redis.error_reply('ERR_PATH path cannot be root for NUMINCRBY (safeguard)')
+    end
+
+    local current_value = get_value_at_path(current_doc, path_segments)
+
+    if current_value == nil then
+        return redis.error_reply('ERR_NOPATH path ' .. path_str .. ' does not exist or is null')
+    end
+
+    if type(current_value) ~= 'number' then
+        return redis.error_reply('ERR_TYPE value at path ' .. path_str .. ' is not a number, it is a ' .. type(current_value))
+    end
+
+    local increment_by = tonumber(increment_by_str)
+    if increment_by == nil then
+        return redis.error_reply('ERR_ARG_CONVERT increment value ' .. increment_by_str .. ' is not a valid number')
+    end
+
+    local new_value = current_value + increment_by
+
+    -- Ensure the new value is a valid number for JSON (e.g. not NaN or Infinity)
+    if new_value ~= new_value or new_value == math.huge or new_value == -math.huge then
+        return redis.error_reply('ERR_OVERFLOW numeric overflow or invalid result after increment')
+    end
+
+    local success, err_set = set_value_at_path(current_doc, path_segments, new_value, false) -- create_path is false
+    if not success then
+        return redis.error_reply('ERR_SET_PATH Failed to set new numeric value: ' .. (err_set or 'unknown error'))
+    end
+
+    local new_doc_json_str, err_encode = cjson.encode(current_doc)
+    if not new_doc_json_str then
+        return redis.error_reply('ERR_ENCODE Failed to encode document after NUMINCRBY: ' .. (err_encode or 'unknown error'))
+    end
+
+    redis.call('SET', key, new_doc_json_str)
+
+    return cjson.encode(new_value) -- Return the new value, JSON encoded
+)lua";
+
 LuaScriptManager::LuaScriptManager(RedisConnectionManager* conn_manager)
     : connection_manager_(conn_manager) {
     if (!conn_manager) {
@@ -746,8 +810,9 @@ const std::map<std::string, const std::string*> LuaScriptManager::SCRIPT_DEFINIT
     {"json_get_set", &LuaScriptManager::ATOMIC_JSON_GET_SET_PATH_LUA}, // Renamed from atomic_json_get_set_path
     {"json_compare_set", &LuaScriptManager::ATOMIC_JSON_COMPARE_SET_PATH_LUA}, // Renamed from atomic_json_compare_set_path
     {"json_sparse_merge", &LuaScriptManager::JSON_SPARSE_MERGE_LUA},
+    {"json_object_keys", &LuaScriptManager::JSON_OBJECT_KEYS_LUA},
     // Add any other scripts here if they are defined as static const std::string members
-    {"json_object_keys", &LuaScriptManager::JSON_OBJECT_KEYS_LUA}
+    {"json_numincrby", &LuaScriptManager::JSON_NUMINCRBY_LUA}
 };
 
 const std::string* LuaScriptManager::get_script_body_by_name(const std::string& name) const {

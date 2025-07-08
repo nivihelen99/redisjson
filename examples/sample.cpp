@@ -504,6 +504,94 @@ void run_object_operations(redisjson::RedisJSONClient& client) {
     try { client.del_json(obj_key); } catch (...) {}
 }
 
+void run_numeric_operations(redisjson::RedisJSONClient& client) {
+    print_header("Numeric Operations (JSON.NUMINCRBY)");
+    std::string num_key = "sample:numeric:data";
+    json initial_data = {
+        {"id", "counter_set_1"},
+        {"values", {
+            {"active_users", 100},
+            {"total_requests", 5000.5}
+        }},
+        {"non_numeric", "text"}
+    };
+
+    try {
+        client.set_json(num_key, initial_data);
+        std::cout << "Setup: Initial numeric document set for key '" << num_key << "':\n"
+                  << client.get_json(num_key).dump(2) << std::endl;
+
+        // 1. Increment an integer value
+        json new_active_users = client.json_numincrby(num_key, "values.active_users", 5);
+        std::cout << "\nSUCCESS: Incremented 'values.active_users' by 5. New value: " << new_active_users.dump() << std::endl;
+        // Verification
+        if (new_active_users.get<double>() != 105) { // Lua returns numbers, nlohmann might parse as double
+            std::cerr << "VERIFICATION ERROR: 'values.active_users' should be 105, got " << new_active_users.dump() << std::endl;
+        }
+
+        // 2. Increment a floating point value
+        json new_total_requests = client.json_numincrby(num_key, "values.total_requests", 100.25);
+        std::cout << "SUCCESS: Incremented 'values.total_requests' by 100.25. New value: " << new_total_requests.dump() << std::endl;
+         // Verification (floating point comparison)
+        if (std::abs(new_total_requests.get<double>() - 5100.75) > 0.001) {
+             std::cerr << "VERIFICATION ERROR: 'values.total_requests' should be approx 5100.75, got " << new_total_requests.dump() << std::endl;
+        }
+
+
+        // 3. Decrement an integer value (using negative increment)
+        new_active_users = client.json_numincrby(num_key, "values.active_users", -10);
+        std::cout << "SUCCESS: Decremented 'values.active_users' by 10. New value: " << new_active_users.dump() << std::endl;
+        if (new_active_users.get<double>() != 95) {
+             std::cerr << "VERIFICATION ERROR: 'values.active_users' should be 95, got " << new_active_users.dump() << std::endl;
+        }
+
+        std::cout << "\nFinal document state for key '" << num_key << "':\n"
+                  << client.get_json(num_key).dump(2) << std::endl;
+
+        // 4. Attempt to increment a non-numeric field (expected to fail)
+        std::cout << "\nATTEMPT: Increment 'non_numeric' (a string value) - Expected to fail:" << std::endl;
+        try {
+            client.json_numincrby(num_key, "non_numeric", 5);
+            std::cerr << "ERROR: json_numincrby on non-numeric field did not throw as expected." << std::endl;
+        } catch (const redisjson::LuaScriptException& e) {
+            std::cout << "SUCCESS: Caught expected LuaScriptException for NUMINCRBY on non-numeric: " << e.what() << std::endl;
+        } catch (const redisjson::TypeMismatchException& e) { // For SWSS client-side check
+             std::cout << "SUCCESS: Caught expected TypeMismatchException for NUMINCRBY on non-numeric (SWSS mode): " << e.what() << std::endl;
+        }
+
+
+        // 5. Attempt to increment on a non-existent path (expected to fail)
+         std::cout << "\nATTEMPT: Increment 'values.new_counter' (non-existent path) - Expected to fail:" << std::endl;
+        try {
+            client.json_numincrby(num_key, "values.new_counter", 10);
+            std::cerr << "ERROR: json_numincrby on non-existent path did not throw as expected." << std::endl;
+        } catch (const redisjson::LuaScriptException& e) { // Lua script returns ERR_NOPATH
+            std::cout << "SUCCESS: Caught expected LuaScriptException for NUMINCRBY on non-existent path: " << e.what() << std::endl;
+        } catch (const redisjson::PathNotFoundException& e) { // For SWSS client-side check
+             std::cout << "SUCCESS: Caught expected PathNotFoundException for NUMINCRBY on non-existent path (SWSS mode): " << e.what() << std::endl;
+        }
+
+
+        // 6. Attempt to increment on a non-existent key (expected to fail)
+        std::cout << "\nATTEMPT: Increment on 'sample:numeric:non_existent_key' - Expected to fail:" << std::endl;
+        try {
+            client.json_numincrby("sample:numeric:non_existent_key", "counter", 1);
+            std::cerr << "ERROR: json_numincrby on non-existent key did not throw as expected." << std::endl;
+        } catch (const redisjson::LuaScriptException& e) { // Lua script returns ERR_NOKEY
+            std::cout << "SUCCESS: Caught expected LuaScriptException for NUMINCRBY on non-existent key: " << e.what() << std::endl;
+        } catch (const redisjson::PathNotFoundException& e) { // For SWSS client-side check (get_json fails)
+             std::cout << "SUCCESS: Caught expected PathNotFoundException for NUMINCRBY on non-existent key (SWSS mode): " << e.what() << std::endl;
+        }
+
+
+    } catch (const redisjson::RedisJSONException& e) {
+        std::cerr << "ERROR in Numeric Operations: " << e.what() << std::endl;
+    }
+
+    // Cleanup
+    try { client.del_json(num_key); } catch (...) {}
+}
+
 
 int main() {
     // --- Non-SWSS Mode / Legacy Mode Example ---
@@ -539,6 +627,7 @@ int main() {
         run_atomic_operations(legacy_client); // Original atomic operations using Lua
         run_sparse_merge_operations(legacy_client); // <--- Added new demo
         run_object_operations(legacy_client); // <--- Added new demo for OBJKEYS
+        run_numeric_operations(legacy_client); // <--- Added new demo for NUMINCRBY
 
         print_header("Non-SWSS (Legacy) Mode Sample Program Finished");
 
