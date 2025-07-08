@@ -1,7 +1,9 @@
 #include "gtest/gtest.h"
+#include <gmock/gmock.h> // For EXPECT_THAT and HasSubstr
 #include "redisjson++/lua_script_manager.h"
 #include "redisjson++/redis_connection_manager.h" // Required by LuaScriptManager
 #include "redisjson++/exceptions.h"
+#include "redisjson++/hiredis_RAII.h" // For RedisReplyPtr
 
 using namespace redisjson;
 using json = nlohmann::json;
