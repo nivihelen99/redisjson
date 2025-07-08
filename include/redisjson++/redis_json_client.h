@@ -105,6 +105,13 @@ public:
      */
     bool set_json_sparse(const std::string& key, const json& sparse_json_object);
 
+    // Retrieves the keys of a JSON object at a specified path.
+    // Returns a vector of strings representing the object keys.
+    // If the path does not point to an object, or if the key/path does not exist,
+    // it returns an empty vector. Throws LuaScriptException on script errors.
+    // Path defaults to root '$' if not specified. Only applicable in non-SWSS mode.
+    std::vector<std::string> object_keys(const std::string& key, const std::string& path = "$");
+
     // Path Operations (will be client-side get-modify-set, atomicity lost)
     json get_path(const std::string& key, const std::string& path) const;
     void set_path(const std::string& key, const std::string& path,
