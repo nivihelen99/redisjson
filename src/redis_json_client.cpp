@@ -500,6 +500,47 @@ long long RedisJSONClient::arrindex(const std::string& key,
     throw JsonParsingException("JSON.ARRINDEX script did not return an integer as expected. Got: " + script_result.dump());
 }
 
+// --- Numeric Operations ---
+json RedisJSONClient::json_numincrby(const std::string& key, const std::string& path, double value) {
+    if (_is_swss_mode) {
+        // Non-atomic get-modify-set for SWSS mode
+        json doc = _get_document_for_modification(key); // Creates empty {} if key not found
+        json current_value_at_path = json(nullptr);
+        bool path_existed = true;
+        std::vector<PathParser::PathElement> parsed_path = _path_parser->parse(path);
+
+        try {
+            current_value_at_path = _json_modifier->get(doc, parsed_path);
+        } catch (const PathNotFoundException&) {
+            path_existed = false; // current_value_at_path remains null
+        }
+
+        // Path must exist and be a number. RedisJSON errors if path doesn't exist for NUMINCRBY.
+        if (!path_existed) {
+            throw PathNotFoundException(key, path);
+        }
+        if (!current_value_at_path.is_number()) {
+            throw TypeMismatchException(path, "number", current_value_at_path.type_name());
+        }
+
+        double new_numeric_value = current_value_at_path.get<double>() + value;
+        json new_json_value = new_numeric_value;
+
+        SetOptions opts;
+        _json_modifier->set(doc, parsed_path, new_json_value, false /*create_path*/, true /*overwrite*/);
+        _set_document_after_modification(key, doc, opts);
+        return new_json_value;
+
+    } else { // Legacy mode (atomic via Lua)
+        throwIfNotLegacyWithLua("json_numincrby");
+        std::string value_str = json(value).dump(); // Ensure double is correctly stringified for Lua
+        json result = _lua_script_manager->execute_script("json_numincrby", {key}, {path, value_str});
+        // Lua script for numincrby returns the new value, JSON encoded.
+        // execute_script already parses this.
+        return result;
+    }
+}
+
 // --- Merge Operations ---
 void RedisJSONClient::merge_json(const std::string& key, const json& patch) {
     if (_is_swss_mode) {
