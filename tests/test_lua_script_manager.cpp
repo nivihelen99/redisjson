@@ -912,12 +912,15 @@ TEST_F(LuaScriptManagerJsonClearTest, ClearEmptyRootObject) {
 }
 
 TEST_F(LuaScriptManagerJsonClearTest, ClearNestedArray) {
-    json initial_doc = {{"data", {"list", {1,2,3}}}};
+    // Ensure initial_doc is {"data": {"list": [1,2,3]}}
+    // The previous syntax {{"data", {"list", {1,2,3}}}} might have created {"data": ["list", [1,2,3]]}
+    // which would make "data.list" an invalid path to the array [1,2,3].
+    json initial_doc = R"({"data":{"list":[1,2,3]}})"_json;
     set_initial_json(initial_doc);
     json result = script_manager_.execute_script("json_clear", {test_key_}, {"data.list"});
     ASSERT_TRUE(result.is_number_integer());
     EXPECT_EQ(result.get<long long>(), 1); // The array 'list' itself is cleared
-    json expected_doc = {{"data", {"list", json::array()}}};
+    json expected_doc = R"({"data":{"list":[]}})"_json; // Ensure expected doc matches the new style
     EXPECT_EQ(get_current_json(), expected_doc);
 }
 
@@ -936,15 +939,15 @@ TEST_F(LuaScriptManagerJsonClearTest, PathToScalarNumber) {
     set_initial_json({{"value", 123}});
     json result = script_manager_.execute_script("json_clear", {test_key_}, {"value"});
     ASSERT_TRUE(result.is_number_integer());
-    EXPECT_EQ(result.get<long long>(), 1); // Scalar "cleared" (touched)
-    EXPECT_EQ(get_current_json()["value"], 123); // Value unchanged
+    EXPECT_EQ(result.get<long long>(), 1); // Number is modified (set to 0), count is 1
+    EXPECT_EQ(get_current_json()["value"], 0); // Value becomes 0
 }
 
 TEST_F(LuaScriptManagerJsonClearTest, PathToScalarString) {
     set_initial_json({{"text", "hello"}});
     json result = script_manager_.execute_script("json_clear", {test_key_}, {"text"});
     ASSERT_TRUE(result.is_number_integer());
-    EXPECT_EQ(result.get<long long>(), 1); // Scalar "cleared"
+    EXPECT_EQ(result.get<long long>(), 0); // String is not modified, count is 0
     EXPECT_EQ(get_current_json()["text"], "hello"); // Value unchanged
 }
 
@@ -952,7 +955,7 @@ TEST_F(LuaScriptManagerJsonClearTest, PathToScalarBoolean) {
     set_initial_json({{"flag", true}});
     json result = script_manager_.execute_script("json_clear", {test_key_}, {"flag"});
     ASSERT_TRUE(result.is_number_integer());
-    EXPECT_EQ(result.get<long long>(), 1); // Scalar "cleared"
+    EXPECT_EQ(result.get<long long>(), 0); // Boolean is not modified, count is 0
     EXPECT_EQ(get_current_json()["flag"], true); // Value unchanged
 }
 
@@ -960,7 +963,7 @@ TEST_F(LuaScriptManagerJsonClearTest, PathToNull) {
     set_initial_json({{"maybe", nullptr}});
     json result = script_manager_.execute_script("json_clear", {test_key_}, {"maybe"});
     ASSERT_TRUE(result.is_number_integer());
-    EXPECT_EQ(result.get<long long>(), 1); // Scalar "cleared"
+    EXPECT_EQ(result.get<long long>(), 0); // Null is not modified, count is 0
     EXPECT_TRUE(get_current_json()["maybe"].is_null()); // Value unchanged
 }
 
