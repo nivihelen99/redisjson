@@ -572,6 +572,79 @@ const std::string LuaScriptManager::JSON_SPARSE_MERGE_LUA = R"lua(
     return 1 -- Success
 )lua";
 
+const std::string LuaScriptManager::JSON_OBJECT_KEYS_LUA = LUA_COMMON_HELPERS + R"lua(
+-- Script for JSON.OBJKEYS
+-- KEYS[1] - The key where the JSON document is stored
+-- ARGV[1] - The path to the object within the JSON document. Defaults to root '$' if not provided or empty.
+
+local key = KEYS[1]
+local path_str = ARGV[1]
+
+-- Get the JSON string from Redis
+local current_json_str = redis.call('GET', key)
+if not current_json_str then
+    return nil -- Key not found
+end
+
+-- Decode the JSON string
+local current_doc, err_decode = cjson.decode(current_json_str)
+if not current_doc then
+    return redis.error_reply('ERR_DECODE Failed to decode JSON for key ' .. key .. ': ' .. (err_decode or 'unknown error'))
+end
+
+local target_object = current_doc
+if path_str ~= '$' and path_str ~= '' and path_str ~= nil then
+    local path_segments = parse_path(path_str)
+    if path_segments == nil or (type(path_segments) == 'table' and path_segments.err) then -- Check for error reply from parse_path
+         return redis.error_reply('ERR_PATH Invalid path string: ' .. path_str .. (path_segments.err or ''))
+    end
+    if #path_segments > 0 then -- Only try to get sub-path if segments exist
+        target_object = get_value_at_path(current_doc, path_segments)
+    end
+end
+
+-- Check if the target is a table (potential object or array)
+if type(target_object) ~= 'table' then
+    return nil -- Path does not lead to an object or array, or path not found
+end
+
+-- Check if it's an object (not an array).
+-- A simple heuristic: an array will have numeric keys 1..N and its length #target_object will be N.
+-- An empty table {} could be an empty object or an empty array. OBJKEYS on empty array is an error in RedisJSON.
+-- OBJKEYS on empty object returns an empty array.
+local is_array = true
+local n = 0
+local first_key = next(target_object) -- Check if table is empty
+
+if first_key == nil then -- Empty table: {}
+    is_array = false -- Treat empty table as an object for OBJKEYS, returning []
+else
+    for k,v in pairs(target_object) do
+        n = n + 1
+        if type(k) ~= 'number' or k < 1 or k > n then -- Crude check, but good enough for cjson decoded tables
+            is_array = false
+            break
+        end
+    end
+    if is_array and #target_object ~= n then -- e.g. sparse array like {1='a', 3='c'}
+        is_array = false
+    end
+end
+
+if is_array then
+    return nil -- Target is an array, not an object. RedisJSON JSON.OBJKEYS returns error here. Let's return nil.
+end
+
+-- Collect keys from the object
+local keys_array = {}
+for k, v in pairs(target_object) do
+    table.insert(keys_array, tostring(k)) -- Ensure keys are strings
+end
+
+-- Return the keys as a JSON array string
+return cjson.encode(keys_array)
+)lua";
+
 LuaScriptManager::LuaScriptManager(RedisConnectionManager* conn_manager)
     : connection_manager_(conn_manager) {
     if (!conn_manager) {
@@ -666,8 +739,9 @@ const std::map<std::string, const std::string*> LuaScriptManager::SCRIPT_DEFINIT
     {"json_array_length", &LuaScriptManager::JSON_ARRAY_LENGTH_LUA},
     {"json_get_set", &LuaScriptManager::ATOMIC_JSON_GET_SET_PATH_LUA}, // Renamed from atomic_json_get_set_path
     {"json_compare_set", &LuaScriptManager::ATOMIC_JSON_COMPARE_SET_PATH_LUA}, // Renamed from atomic_json_compare_set_path
+    {"json_sparse_merge", &LuaScriptManager::JSON_SPARSE_MERGE_LUA},
     // Add any other scripts here if they are defined as static const std::string members
-    {"json_sparse_merge", &LuaScriptManager::JSON_SPARSE_MERGE_LUA}
+    {"json_object_keys", &LuaScriptManager::JSON_OBJECT_KEYS_LUA}
 };
 
 const std::string* LuaScriptManager::get_script_body_by_name(const std::string& name) const {
