@@ -196,7 +196,15 @@ local function del_value_at_path(doc, path_segments)
 end
 )lua";
 
-const std::string LUA_COMMON_HELPERS = LUA_HELPER_PARSE_PATH_FUNC + LUA_HELPER_GET_VALUE_AT_PATH_FUNC + LUA_HELPER_SET_VALUE_AT_PATH_FUNC + LUA_HELPER_DEL_VALUE_AT_PATH_FUNC;
+const std::string LUA_HELPER_EMPTY_ARRAY_FUNC = R"lua(
+local function empty_array()
+    local arr = {}
+    setmetatable(arr, { __array = true })
+    return arr
+end
+)lua";
+
+const std::string LUA_COMMON_HELPERS = LUA_HELPER_PARSE_PATH_FUNC + LUA_HELPER_GET_VALUE_AT_PATH_FUNC + LUA_HELPER_SET_VALUE_AT_PATH_FUNC + LUA_HELPER_DEL_VALUE_AT_PATH_FUNC + LUA_HELPER_EMPTY_ARRAY_FUNC;
 
 const std::string LuaScriptManager::JSON_PATH_GET_LUA = LUA_COMMON_HELPERS + R"lua(
     local key = KEYS[1]
@@ -921,78 +929,52 @@ const std::string LuaScriptManager::JSON_ARRAY_INSERT_LUA = LUA_COMMON_HELPERS +
     if insert_idx == 0 then -- Insert at the beginning
         insert_idx = 1
     elseif insert_idx > 0 then -- Positive index
-        insert_idx = insert_idx + 1 -- Convert 0-based client to 1-based Lua for position *after* which to insert
-                                    -- No, table.insert(list, pos, val) inserts AT pos, shifting others.
-                                    -- So, 0-based client index 'i' becomes 1-based Lua index 'i+1'.
-        if insert_idx > arr_len + 1 then -- If index is out of bounds (too large)
-            insert_idx = arr_len + 1 -- Append to the end
+        insert_idx = insert_idx + 1
+        if insert_idx > arr_len + 1 then
+            insert_idx = arr_len + 1
         end
     else -- Negative index (insert_idx < 0)
-        -- -1 means insert before the last element (i.e. at current len)
-        -- -2 means insert before the second to last (i.e. at current len - 1)
-        -- So, effective_idx = arr_len + insert_idx + 1 (in 1-based)
         insert_idx = arr_len + insert_idx + 1
-        if insert_idx < 1 then -- If index is too small (e.g., -ve larger than arr_len)
-            insert_idx = 1 -- Insert at the beginning
+        if insert_idx < 1 then
+            insert_idx = 1
         end
     end
 
-    -- If after adjustments, index is still problematic (e.g. target_array_ref was empty, arr_len=0)
-    -- For an empty array, arr_len = 0.
-    -- If insert_idx (client) = 0, Lua idx = 1. Correct.
-    -- If insert_idx (client) = -1, Lua idx = 0 + (-1) + 1 = 0. This should become 1.
-    -- Let's refine negative and boundary conditions for Lua's table.insert:
-    -- Lua's table.insert(t, pos, val) inserts val at position pos.
-    -- If pos > #t + 1, it's an error by default Lua, but RedisJSON appends.
-    -- If pos < 1, it's an error. RedisJSON prepends.
-
-    if arr_len == 0 then -- Target array is empty
-        insert_idx = 1 -- Always insert at the beginning for an empty array
+    if arr_len == 0 then
+        insert_idx = 1
     else
-        if index_str == "0" then -- Original client index was 0
+        if index_str == "0" then
             insert_idx = 1
         else
-            local client_idx = tonumber(index_str) -- Re-parse for clarity
+            local client_idx = tonumber(index_str)
             if client_idx > 0 then
                 insert_idx = client_idx + 1
                 if insert_idx > arr_len + 1 then insert_idx = arr_len + 1 end
             elseif client_idx < 0 then
                 insert_idx = arr_len + client_idx + 1
                 if insert_idx < 1 then insert_idx = 1 end
-            else -- client_idx == 0 was handled by index_str == "0"
-                 -- This path should not be taken if index_str is a valid number != 0
             end
         end
     end
 
-
     local values_to_insert = {}
     for i = 3, #ARGV do
         local val_json_str = ARGV[i]
-        local val -- This will hold the decoded value if successful
-        local err_msg -- This will hold the error message if decode fails
+        local val
+        local err_msg
 
         local success, result = pcall(cjson.decode, val_json_str)
 
         if success then
             val = result
-            -- If cjson.decode successfully returns Lua nil for an input that wasn't the string "null",
-            -- (e.g. if cjson.decode("") -> nil), treat it as a failure for consistency with original script's expectation.
-            -- Note: cjson.decode("null") results in `cjson.null`, not Lua `nil`.
-            -- `val == nil` checks for actual Lua nil.
             if val == nil and val_json_str ~= "null" then
-                -- This specific path might indicate an unexpected behavior from cjson.decode for certain inputs (e.g. empty string)
-                -- if it returns Lua nil instead of erroring or returning a cjson.null or other value.
-                -- Standard cjson would typically error on empty string or malformed JSON.
                 err_msg = "Input string decoded to Lua nil, but input was not 'null'"
-                success = false -- Force error path below
+                success = false
             end
         else
-            -- pcall failed, result contains the error message from cjson.decode
-            err_msg = tostring(result) -- Ensure it's a string
+            err_msg = tostring(result)
         end
 
-        -- Check 'success' flag (from pcall, or overridden if decoded to nil for non-null input)
         if not success then
             return redis.error_reply('ERR_DECODE_ARG Failed to decode value argument #' .. (i-2) .. ' ("' .. val_json_str .. '"): ' .. (err_msg or 'unknown decode error'))
         end
@@ -1004,11 +986,9 @@ const std::string LuaScriptManager::JSON_ARRAY_INSERT_LUA = LUA_COMMON_HELPERS +
         return redis.error_reply('ERR_NO_VALUES No values provided for insertion')
     end
 
-    -- Insert values one by one. Each subsequent insert will be at an incremented index
-    -- due to previous insertions shifting elements.
     for i, value_to_insert in ipairs(values_to_insert) do
         table.insert(target_array_ref, insert_idx, value_to_insert)
-        insert_idx = insert_idx + 1 -- Next value goes after the one just inserted
+        insert_idx = insert_idx + 1
     end
 
     local new_doc_json_str, err_encode = cjson.encode(doc)
@@ -1018,112 +998,8 @@ const std::string LuaScriptManager::JSON_ARRAY_INSERT_LUA = LUA_COMMON_HELPERS +
 
     redis.call('SET', key, new_doc_json_str)
 
-    return #target_array_ref -- Return the new length of the array
+    return #target_array_ref
 )lua";
-
-LuaScriptManager::LuaScriptManager(RedisConnectionManager* conn_manager)
-    : connection_manager_(conn_manager) {
-    if (!conn_manager) {
-        throw std::invalid_argument("RedisConnectionManager cannot be null for LuaScriptManager.");
-    }
-}
-
-LuaScriptManager::~LuaScriptManager() {
-    // Destructor remains the same
-}
-
-void LuaScriptManager::load_script(const std::string& name, const std::string& script_body) {
-    // std::cout << "LOG: LuaScriptManager::load_script() - Entry for script name: '" << name << "'. Thread ID: " << std::this_thread::get_id() << std::endl;
-    if (name.empty() || script_body.empty()) {
-        // std::cout << "ERROR_LOG: LuaScriptManager::load_script() - Script name or body is empty. Name: '" << name << "'. Throwing." << std::endl;
-        throw std::invalid_argument("Script name and body cannot be empty.");
-    }
-
-    // std::cout << "LOG: LuaScriptManager::load_script() - Getting connection for SCRIPT LOAD '" << name << "'. Thread ID: " << std::this_thread::get_id() << std::endl;
-    RedisConnectionManager::RedisConnectionPtr conn_guard = connection_manager_->get_connection();
-    RedisConnection* conn = conn_guard.get();
-
-    if (!conn || !conn->is_connected()) {
-        // std::cout << "ERROR_LOG: LuaScriptManager::load_script() - Failed to get valid Redis connection for SCRIPT LOAD '" << name << "'. Conn is " << (conn ? "not null but not connected" : "null") << ". Throwing. Thread ID: " << std::this_thread::get_id() << std::endl;
-        // conn_guard will release connection if it's not null
-        throw ConnectionException("Failed to get valid Redis connection for SCRIPT LOAD.");
-    }
-    // std::cout << "LOG: LuaScriptManager::load_script() - Got connection for SCRIPT LOAD '" << name << "'. Host: " << conn->get_host() << ":" << conn->get_port() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
-
-    // std::cout << "LOG: LuaScriptManager::load_script() - Calling conn->command('SCRIPT LOAD ...') for script '" << name << "'. First 30 chars of body: " << script_body.substr(0, 30) << (script_body.length() > 30 ? "..." : "") << ". Thread ID: " << std::this_thread::get_id() << std::endl;
-    RedisReplyPtr reply(static_cast<redisReply*>(conn->command("SCRIPT LOAD %s", script_body.c_str())));
-
-    std::string error_context_for_throw;
-    if (conn && conn->get_context()) { // Check if conn and its context are valid
-        error_context_for_throw = " (hiredis context error: " + std::string(conn->get_context()->errstr ? conn->get_context()->errstr : "unknown") +
-                                  ", code: " + std::to_string(conn->get_context()->err) + ")";
-    } else if (conn) {
-        error_context_for_throw = " (hiredis context is null, connection might be bad)";
-    } else {
-        error_context_for_throw = " (RedisConnection object is null)";
-    }
-
-
-    if (!reply) {
-        // std::cout << "ERROR_LOG: LuaScriptManager::load_script() - conn->command('SCRIPT LOAD') for '" << name << "' returned null reply. Error context:" << error_context_for_throw << ". Throwing. Thread ID: " << std::this_thread::get_id() << std::endl;
-        // conn_guard will release connection
-        throw RedisCommandException("SCRIPT LOAD", "No reply from Redis for script '" + name + "'" + error_context_for_throw);
-    }
-    // std::cout << "LOG: LuaScriptManager::load_script() - conn->command('SCRIPT LOAD') for '" << name << "' returned. Reply type: " << reply->type << ". Thread ID: " << std::this_thread::get_id() << std::endl;
-
-    std::string sha1_hash;
-    if (reply->type == REDIS_REPLY_STRING) {
-        sha1_hash = std::string(reply->str, reply->len);
-        // std::cout << "LOG: LuaScriptManager::load_script() - Script '" << name << "' loaded successfully. SHA1: " << sha1_hash << ". Thread ID: " << std::this_thread::get_id() << std::endl;
-    } else if (reply->type == REDIS_REPLY_ERROR) {
-        std::string err_msg = (reply->str ? std::string(reply->str, reply->len) : "Unknown Redis error");
-        // std::cout << "ERROR_LOG: LuaScriptManager::load_script() - SCRIPT LOAD for '" << name << "' failed with REDIS_REPLY_ERROR: " << err_msg << ". Throwing. Thread ID: " << std::this_thread::get_id() << std::endl;
-        // conn_guard will release connection
-        throw RedisCommandException("SCRIPT LOAD", "Error for script '" + name + "': " + err_msg);
-    } else {
-        // std::cout << "ERROR_LOG: LuaScriptManager::load_script() - SCRIPT LOAD for '" << name << "' returned unexpected reply type: " << reply->type << ". Throwing. Thread ID: " << std::this_thread::get_id() << std::endl;
-        // conn_guard will release connection
-        throw RedisCommandException("SCRIPT LOAD", "Unexpected reply type for script '" + name + "': " + std::to_string(reply->type));
-    }
-
-    if (sha1_hash.empty()) {
-        // std::cout << "ERROR_LOG: LuaScriptManager::load_script() - SCRIPT LOAD for '" << name << "' resulted in empty SHA1 hash. Throwing. Thread ID: " << std::this_thread::get_id() << std::endl;
-         // conn_guard will release connection
-         throw RedisCommandException("SCRIPT LOAD", "Failed to load script '" + name + "', SHA1 hash is empty.");
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(cache_mutex_);
-        script_shas_[name] = sha1_hash;
-        // std::cout << "LOG: LuaScriptManager::load_script() - Cached SHA1 for script '" << name << "'. Thread ID: " << std::this_thread::get_id() << std::endl;
-    }
-
-    // Connection is returned by RedisConnectionPtr conn_guard going out of scope.
-    // No explicit call to return_connection needed here for logging its return.
-    // std::cout << "LOG: LuaScriptManager::load_script() - Exiting for script name: '" << name << "'. Connection will be returned by RAII. Thread ID: " << std::this_thread::get_id() << std::endl;
-}
-
-// Initialize the static map of script definitions
-const std::map<std::string, const std::string*> LuaScriptManager::SCRIPT_DEFINITIONS = {
-    {"json_path_get", &LuaScriptManager::JSON_PATH_GET_LUA},
-    {"json_path_set", &LuaScriptManager::JSON_PATH_SET_LUA},
-    {"json_path_del", &LuaScriptManager::JSON_PATH_DEL_LUA},
-    {"json_path_type", &LuaScriptManager::JSON_PATH_TYPE_LUA},
-    {"json_array_append", &LuaScriptManager::JSON_ARRAY_APPEND_LUA},
-    {"json_array_prepend", &LuaScriptManager::JSON_ARRAY_PREPEND_LUA},
-    {"json_array_pop", &LuaScriptManager::JSON_ARRAY_POP_LUA},
-    {"json_array_length", &LuaScriptManager::JSON_ARRAY_LENGTH_LUA},
-    {"json_get_set", &LuaScriptManager::ATOMIC_JSON_GET_SET_PATH_LUA}, // Renamed from atomic_json_get_set_path
-    {"json_compare_set", &LuaScriptManager::ATOMIC_JSON_COMPARE_SET_PATH_LUA}, // Renamed from atomic_json_compare_set_path
-    {"json_sparse_merge", &LuaScriptManager::JSON_SPARSE_MERGE_LUA},
-    {"json_object_keys", &LuaScriptManager::JSON_OBJECT_KEYS_LUA},
-    {"json_numincrby", &LuaScriptManager::JSON_NUMINCRBY_LUA},
-    {"json_object_length", &LuaScriptManager::JSON_OBJECT_LENGTH_LUA},
-    {"json_array_insert", &LuaScriptManager::JSON_ARRAY_INSERT_LUA},
-    {"json_clear", &LuaScriptManager::JSON_CLEAR_LUA},
-    {"json_arrindex", &LuaScriptManager::JSON_ARRINDEX_LUA}
-    // Add any other scripts here if they are defined as static const std::string members
-};
 
 const std::string LuaScriptManager::JSON_ARRINDEX_LUA = LUA_COMMON_HELPERS + R"lua(
 -- Script for JSON.ARRINDEX (emulated)
@@ -1189,9 +1065,6 @@ else
     if is_actual_array and count > 0 and max_idx ~= count then -- Check for sparse array, e.g. {1='a', 3='c'}
         is_actual_array = false
     end
-    -- If all keys were numbers but not sequential from 1 up to count, it's not a dense JSON array.
-    -- The #operator in Lua gives the length of the sequence part.
-    -- If #target_array_ref is not equal to the total number of numeric keys and it's not empty, it's not a dense array.
     if is_actual_array and count > 0 and #target_array_ref ~= count then
          is_actual_array = false
     end
@@ -1206,11 +1079,9 @@ local array_len = #target_array_ref
 
 -- Decode the value to search for
 local value_to_find, err_find_val = cjson.decode(value_to_find_json_str)
-if err_find_val then -- cjson.decode returns nil, error_message on failure
+if err_find_val then
     return redis.error_reply('ERR_DECODE_ARG_VALUE Failed to decode search value JSON: ' .. err_find_val)
 end
--- Note: cjson.decode('null') correctly returns cjson.null.
--- cjson.decode('true') returns true, cjson.decode('123') returns 123.
 
 -- Determine search range (Lua 1-based indices)
 local start_idx_lua = 1
@@ -1222,9 +1093,9 @@ if start_index_str and start_index_str ~= '' then
     if start_idx_client < 0 then
         start_idx_lua = array_len + start_idx_client + 1
     else
-        start_idx_lua = start_idx_client + 1 -- Convert 0-based client to 1-based Lua
+        start_idx_lua = start_idx_client + 1
     end
-    if start_idx_lua < 1 then start_idx_lua = 1 end -- Clamp
+    if start_idx_lua < 1 then start_idx_lua = 1 end
 end
 
 if end_index_str and end_index_str ~= '' then
@@ -1233,35 +1104,27 @@ if end_index_str and end_index_str ~= '' then
     if end_idx_client < 0 then
         end_idx_lua = array_len + end_idx_client + 1
     else
-        end_idx_lua = end_idx_client + 1 -- Convert 0-based client to 1-based Lua
+        end_idx_lua = end_idx_client + 1
     end
-    if end_idx_lua > array_len then end_idx_lua = array_len end -- Clamp
+    if end_idx_lua > array_len then end_idx_lua = array_len end
 end
 
--- If array is empty or effective start is after effective end, no match possible.
 if array_len == 0 or start_idx_lua > end_idx_lua then
     return -1
 end
 
--- Iterate and find the value
 for i = start_idx_lua, end_idx_lua do
     local current_element = target_array_ref[i]
-    -- Comparison:
-    -- For cjson.null, direct `==` works with other cjson.null.
-    -- For numbers, strings, booleans, direct `==` works.
-    -- Lua tables (representing JSON objects/arrays) are compared by reference with `==`.
-    -- JSON.ARRINDEX is typically for scalar values. If value_to_find is a table, this simple `==` will likely not work as intended for value equality.
-    -- For this implementation, we focus on scalar comparison.
     if current_element == value_to_find then
-        return i - 1 -- Return 0-based client index
+        return i - 1
     end
 end
 
-return -1 -- Not found
+return -1
 )lua";
 
 const std::string LuaScriptManager::JSON_CLEAR_LUA = LUA_COMMON_HELPERS + R"lua(
--- Refined JSON_CLEAR_LUA (Attempt 3 to fix test failures)
+-- Refined JSON_CLEAR_LUA (Original from prompt, seems more correct)
 local function do_clear_recursive(target_value, is_target_array_hint)
     local count = 0
     local actually_modified_structure = false
@@ -1273,31 +1136,39 @@ local function do_clear_recursive(target_value, is_target_array_hint)
     local is_array = is_target_array_hint
     if is_array == nil then
         is_array = true; local n = 0
-        if next(target_value) == nil then is_array = true; else
+        if next(target_value) == nil then
+            is_array = true;
+        else
             for k, _ in pairs(target_value) do
                 n = n + 1
-                if type(k) ~= 'number' or k < 1 or k > n then is_array = false; break; end
+                if type(k) ~= 'number' or k < 1 or k > n then
+                    is_array = false;
+                    break;
+                end
             end
-            if is_array and #target_value ~= n then is_array = false; end
+            if is_array and #target_value ~= n then
+                is_array = false;
+            end
+            -- This logic was slightly different in the file vs prompt, using prompt's
+            if is_array == nil then -- If it passed all checks and wasn't set to false, it's an array
+                 is_array = true -- Defaulting to true if not definitively an object
+            end
         end
     end
 
     if is_array then
         if #target_value > 0 then
             for i = #target_value, 1, -1 do
-                table.remove(target_value, i) -- Modifies target_value in place
+                table.remove(target_value, i)
             end
             count = 1
             actually_modified_structure = true
-            -- No need to replace with cjson.decode('[]') here, as table.remove modifies in place.
-            -- The issue is when this modified (now empty) table is assigned back to its parent if it's a sub-element.
-            -- Or if target_value itself is the root.
         else
-            count = 0 -- Already empty
+            count = 0
         end
     else -- It's an object
         local keys_to_iterate = {}
-        for k, _ in pairs(target_value) do table.insert(keys_to_iterate, k) end
+        for k_obj, _ in pairs(target_value) do table.insert(keys_to_iterate, k_obj) end
 
         for _, k in ipairs(keys_to_iterate) do
             local v = target_value[k]
@@ -1314,7 +1185,7 @@ local function do_clear_recursive(target_value, is_target_array_hint)
                 if next(v) == nil then sub_is_array_hint = true; else
                     for sk_sub,_ in pairs(v) do sub_n_keys = sub_n_keys+1; if type(sk_sub)~='number' or sk_sub<1 or sk_sub>sub_n_keys then sub_is_array_hint=false; break; end end
                     if sub_is_array_hint == nil and #v ~= sub_n_keys then sub_is_array_hint = false; end
-                    if sub_is_array_hint == nil then sub_is_array_hint = true; end
+                    if sub_is_array_hint == nil then sub_is_array_hint = true; end -- Defaulting to true
                 end
 
                 local sub_cleared_count, sub_modified = do_clear_recursive(v, sub_is_array_hint)
@@ -1322,13 +1193,14 @@ local function do_clear_recursive(target_value, is_target_array_hint)
                 if sub_cleared_count > 0 then count = count + sub_cleared_count; end
                 if sub_modified then item_modified_this_iteration = true; end
 
-                -- If the sub-table was an array and it's now empty due to clearing,
-                -- replace it with a proper empty array Lua table.
-                if sub_is_array_hint and #v == 0 and sub_modified then -- sub_modified ensures it became empty *due to clearing*
-                    target_value[k] = cjson.decode('[]') -- Replace with a table cjson knows is an array
+                if sub_is_array_hint and #v == 0 and sub_modified then
+                    -- Using setmetatable to ensure cjson encodes it as []
+                    setmetatable(v, { __array = true })
                 end
             end
-            if item_modified_this_iteration then actually_modified_structure = true; end
+            if item_modified_this_iteration then
+                actually_modified_structure = true;
+            end
         end
     end
     return count, actually_modified_structure
@@ -1351,7 +1223,7 @@ if not current_doc then
 end
 
 local cleared_count = 0
-local doc_modified_overall = false -- Renamed for clarity
+local doc_modified_overall = false
 
 if path_str == '$' or path_str == '' then
     if type(current_doc) == 'table' then
@@ -1362,58 +1234,61 @@ if path_str == '$' or path_str == '' then
             if root_is_array==nil then root_is_array=true; end
         end
         cleared_count, doc_modified_overall = do_clear_recursive(current_doc, root_is_array)
-        if root_is_array and #current_doc == 0 and doc_modified_overall then
-             -- If root was an array and is now empty and was modified (cleared)
-             current_doc = cjson.decode('[]')
+        if root_is_array and (type(current_doc)=='table' and #current_doc == 0) and doc_modified_overall then
+             -- Ensure root empty array is encoded as [] by cjson
+             setmetatable(current_doc, { __array = true })
         end
     else
-        cleared_count = 1
-        -- doc_modified_overall remains false for scalar root
+         cleared_count = 0; doc_modified_overall = false;
     end
 else -- Path is not root
+    -- This is the part that was missing / replaced by C++ code in the problematic version
     local path_segments = parse_path(path_str)
     if path_segments == nil or (type(path_segments) == 'table' and path_segments.err) then
-        return redis.error_reply('ERR_PATH Invalid path string: ' .. path_str .. (path_segments.err or ''))
+        return redis.error_reply('ERR_PATH Invalid path string for CLEAR: ' .. path_str .. (path_segments.err or ''))
     end
-
-    if #path_segments == 0 then -- Should be caught by root check
-         if type(current_doc) == 'table' then
-            local root_is_array_s = nil; local n_s_keys=0; if next(current_doc)==nil then root_is_array_s=true; else for ks,_ in pairs(current_doc) do n_s_keys=n_s_keys+1; if type(ks)~='number' or ks<1 or ks>n_s_keys then root_is_array_s=false;break;end;end;if root_is_array_s==nil and #current_doc ~= n_s_keys then root_is_array_s=false;end;if root_is_array_s==nil then root_is_array_s=true;end end
-            cleared_count, doc_modified_overall = do_clear_recursive(current_doc, root_is_array_s)
-            if root_is_array_s and #current_doc == 0 and doc_modified_overall then
-                 current_doc = cjson.decode('[]')
-            end
-        else cleared_count = 1; end
+    if #path_segments == 0 then -- Path resolved to root, should be handled by above block
+        -- This case should ideally not be hit if parse_path handles '$' correctly to return empty segments
+        -- and the root path logic is comprehensive.
+        -- Re-evaluate root if necessary (defensive)
+        if type(current_doc) == 'table' then
+            local root_is_array2 = nil; local n_root_keys2=0; if next(current_doc)==nil then root_is_array2=true; else for kr,_ in pairs(current_doc) do n_root_keys2=n_root_keys2+1; if type(kr)~='number' or kr<1 or kr>n_root_keys2 then root_is_array2=false; break; end end; if root_is_array2==nil and #current_doc~=n_root_keys2 then root_is_array2=false; end; if root_is_array2==nil then root_is_array2=true; end end
+            cleared_count, doc_modified_overall = do_clear_recursive(current_doc, root_is_array2)
+            if root_is_array2 and #current_doc == 0 and doc_modified_overall then setmetatable(current_doc, { __array = true }); end
+        else cleared_count = 0; doc_modified_overall = false; end
     else
-        -- Traverse to the parent to get a reference to the target_value's container
-        local parent_ref = current_doc
+        -- Path is not root, and path_segments is not empty
+        local parent = current_doc
         for i = 1, #path_segments - 1 do
-            local segment = path_segments[i]
-            if type(parent_ref) ~= 'table' or parent_ref[segment] == nil then return 0; end -- Path not found
-            parent_ref = parent_ref[segment]
+            if type(parent) ~= 'table' or parent[path_segments[i]] == nil then
+                return 0 -- Path not found, nothing to clear
+            end
+            parent = parent[path_segments[i]]
         end
 
         local final_segment = path_segments[#path_segments]
-        if type(parent_ref) ~= 'table' or parent_ref[final_segment] == nil then return 0; end -- Path not found
+        if type(parent) ~= 'table' or parent[final_segment] == nil then
+            return 0 -- Path not found, nothing to clear
+        end
 
-        local target_value_ref = parent_ref[final_segment]
-
-        if type(target_value_ref) == 'table' then
-            local target_is_array_hint = nil; local n_target_keys=0; if next(target_value_ref)==nil then target_is_array_hint=true; else for kt,_ in pairs(target_value_ref) do n_target_keys=n_target_keys+1; if type(kt)~='number' or kt<1 or kt>n_target_keys then target_is_array_hint=false;break;end;end;if target_is_array_hint==nil and #target_value_ref ~= n_target_keys then target_is_array_hint=false;end;if target_is_array_hint==nil then target_is_array_hint=true;end end
-
-            local sub_cleared_count, sub_modified
-            sub_cleared_count, sub_modified = do_clear_recursive(target_value_ref, target_is_array_hint)
-            cleared_count = sub_cleared_count
-
-            if sub_modified then
-                doc_modified_overall = true
-                if target_is_array_hint and #target_value_ref == 0 then
-                    parent_ref[final_segment] = cjson.decode('[]') -- Replace in parent
-                end
+        local target_value = parent[final_segment]
+        if type(target_value) == 'table' then
+            local target_is_array = nil; local n_target_keys=0; if next(target_value)==nil then target_is_array=true; else for kt,_ in pairs(target_value) do n_target_keys=n_target_keys+1; if type(kt)~='number' or kt<1 or kt>n_target_keys then target_is_array=false; break; end end; if target_is_array==nil and #target_value~=n_target_keys then target_is_array=false; end; if target_is_array==nil then target_is_array=true; end end
+            cleared_count, doc_modified_overall = do_clear_recursive(target_value, target_is_array)
+            if target_is_array and #target_value == 0 and doc_modified_overall then
+                -- If the cleared target was an array and is now empty, ensure it's correctly represented
+                -- parent[final_segment] = empty_array() -- Reassign to parent
+                setmetatable(target_value, {__array = true}) -- Modify in place, parent already has ref
             end
-        else
+        elseif type(target_value) == 'number' then
+            parent[final_segment] = 0
             cleared_count = 1
-            -- doc_modified_overall remains false for scalar target
+            doc_modified_overall = true
+        else
+            -- Non-container, non-number type at path (e.g. string, boolean, null)
+            -- JSON.CLEAR does not modify these. It returns 0.
+            cleared_count = 0
+            doc_modified_overall = false
         end
     end
 end
@@ -1421,7 +1296,7 @@ end
 if doc_modified_overall then
     local new_doc_json_str, err_encode = cjson.encode(current_doc)
     if not new_doc_json_str then
-        return redis.error_reply('ERR_ENCODE Failed to encode document: ' .. (err_encode or 'unknown error'))
+        return redis.error_reply('ERR_ENCODE Failed to encode document after CLEAR: ' .. (err_encode or 'unknown error'))
     end
     redis.call('SET', key, new_doc_json_str)
 end
@@ -1429,6 +1304,82 @@ end
 return cleared_count
 )lua";
 
+LuaScriptManager::LuaScriptManager(RedisConnectionManager* conn_manager)
+    : connection_manager_(conn_manager) {
+    if (!conn_manager) {
+        throw std::invalid_argument("RedisConnectionManager cannot be null for LuaScriptManager.");
+    }
+}
+
+LuaScriptManager::~LuaScriptManager() {
+    // Destructor remains the same
+}
+
+void LuaScriptManager::load_script(const std::string& name, const std::string& script_body) {
+    if (name.empty() || script_body.empty()) {
+        throw std::invalid_argument("Script name and body cannot be empty.");
+    }
+    RedisConnectionManager::RedisConnectionPtr conn_guard = connection_manager_->get_connection();
+    RedisConnection* conn = conn_guard.get();
+    if (!conn || !conn->is_connected()) {
+        throw ConnectionException("Failed to get valid Redis connection for SCRIPT LOAD.");
+    }
+    RedisReplyPtr reply(static_cast<redisReply*>(conn->command("SCRIPT LOAD %s", script_body.c_str())));
+
+    std::string error_context_for_throw;
+    if (conn && conn->get_context()) {
+        error_context_for_throw = " (hiredis context error: " + std::string(conn->get_context()->errstr ? conn->get_context()->errstr : "unknown") +
+                                  ", code: " + std::to_string(conn->get_context()->err) + ")";
+    } else if (conn) {
+        error_context_for_throw = " (hiredis context is null, connection might be bad)";
+    } else {
+        error_context_for_throw = " (RedisConnection object is null)";
+    }
+
+    if (!reply) {
+        throw RedisCommandException("SCRIPT LOAD", "No reply from Redis for script '" + name + "'" + error_context_for_throw);
+    }
+    std::string sha1_hash;
+    if (reply->type == REDIS_REPLY_STRING) {
+        sha1_hash = std::string(reply->str, reply->len);
+    } else if (reply->type == REDIS_REPLY_ERROR) {
+        std::string err_msg = (reply->str ? std::string(reply->str, reply->len) : "Unknown Redis error");
+        throw RedisCommandException("SCRIPT LOAD", "Error for script '" + name + "': " + err_msg);
+    } else {
+        throw RedisCommandException("SCRIPT LOAD", "Unexpected reply type for script '" + name + "': " + std::to_string(reply->type));
+    }
+
+    if (sha1_hash.empty()) {
+         throw RedisCommandException("SCRIPT LOAD", "Failed to load script '" + name + "', SHA1 hash is empty.");
+    }
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        script_shas_[name] = sha1_hash;
+    }
+}
+
+// Initialize the static map of script definitions
+const std::map<std::string, const std::string*> LuaScriptManager::SCRIPT_DEFINITIONS = {
+    {"json_path_get", &LuaScriptManager::JSON_PATH_GET_LUA},
+    {"json_path_set", &LuaScriptManager::JSON_PATH_SET_LUA},
+    {"json_path_del", &LuaScriptManager::JSON_PATH_DEL_LUA},
+    {"json_path_type", &LuaScriptManager::JSON_PATH_TYPE_LUA},
+    {"json_array_append", &LuaScriptManager::JSON_ARRAY_APPEND_LUA},
+    {"json_array_prepend", &LuaScriptManager::JSON_ARRAY_PREPEND_LUA},
+    {"json_array_pop", &LuaScriptManager::JSON_ARRAY_POP_LUA},
+    {"json_array_length", &LuaScriptManager::JSON_ARRAY_LENGTH_LUA},
+    {"json_get_set", &LuaScriptManager::ATOMIC_JSON_GET_SET_PATH_LUA},
+    {"json_compare_set", &LuaScriptManager::ATOMIC_JSON_COMPARE_SET_PATH_LUA},
+    {"json_sparse_merge", &LuaScriptManager::JSON_SPARSE_MERGE_LUA},
+    {"json_object_keys", &LuaScriptManager::JSON_OBJECT_KEYS_LUA},
+    {"json_numincrby", &LuaScriptManager::JSON_NUMINCRBY_LUA},
+    {"json_object_length", &LuaScriptManager::JSON_OBJECT_LENGTH_LUA},
+    {"json_array_insert", &LuaScriptManager::JSON_ARRAY_INSERT_LUA},
+    {"json_clear", &LuaScriptManager::JSON_CLEAR_LUA},
+    {"json_arrindex", &LuaScriptManager::JSON_ARRINDEX_LUA}
+};
+
+// Moved get_script_body_by_name and redis_reply_to_json here
 const std::string* LuaScriptManager::get_script_body_by_name(const std::string& name) const {
     auto it = SCRIPT_DEFINITIONS.find(name);
     if (it != SCRIPT_DEFINITIONS.end()) {
@@ -1444,17 +1395,14 @@ json LuaScriptManager::redis_reply_to_json(redisReply* reply) const {
         case REDIS_REPLY_STRING:
         case REDIS_REPLY_STATUS: {
             std::string reply_str(reply->str, reply->len);
-            // Heuristic to decide if it's a JSON string or a simple status/error string from Lua
             if ((!reply_str.empty() && (reply_str[0] == '{' || reply_str[0] == '[' || reply_str[0] == '"')) ||
                 reply_str == "null" || reply_str == "true" || reply_str == "false") {
                 try {
                     return json::parse(reply_str);
                 } catch (const json::parse_error& e) {
-                    // It looked like JSON but failed to parse, this is an issue.
                     throw JsonParsingException("Failed to parse script string output as JSON: " + std::string(e.what()) + ", content: " + reply_str);
                 }
             }
-            // Check if it's a number string
             bool is_numeric = true;
             if (reply_str.empty()) is_numeric = false;
             else {
@@ -1469,18 +1417,14 @@ json LuaScriptManager::redis_reply_to_json(redisReply* reply) const {
             }
             if (is_numeric) {
                  try {
-                    // Try to parse as number if it looks like one (e.g. "123", "0.5")
-                    // This might still fail for things like "1.2.3"
-                    // A stricter check might be needed or rely on Lua to return proper types / JSON strings.
                     size_t processed_chars = 0;
                     double num_val = std::stod(reply_str, &processed_chars);
-                    if (processed_chars == reply_str.length()){ // ensure full string was consumed
+                    if (processed_chars == reply_str.length()){
                         if (num_val == static_cast<long long>(num_val)) return json(static_cast<long long>(num_val));
                         return json(num_val);
                     }
                  } catch (const std::exception&) { /* Not a valid number, treat as string below */ }
             }
-            // Otherwise, treat as a simple string value (e.g. "OK", "ERR_NOT_ARRAY")
             return json(reply_str);
         }
         case REDIS_REPLY_INTEGER:
@@ -1507,47 +1451,34 @@ json LuaScriptManager::execute_script(const std::string& name,
     std::string sha1_hash;
     bool attempted_on_demand_load = false;
 
-    // Loop to handle on-demand loading. In practice, it runs once or twice.
     for (int attempt = 0; attempt < 2; ++attempt) {
-        std::unique_lock<std::mutex> lock(cache_mutex_); // Use unique_lock for manual unlock/relock
+        std::unique_lock<std::mutex> lock(cache_mutex_);
         auto it = script_shas_.find(name);
         if (it != script_shas_.end()) {
             sha1_hash = it->second;
-            break; // Found SHA, exit loop
+            break;
         }
-
-        // SHA not found. If already tried on-demand load (i.e. attempt > 0), something is wrong.
         if (attempt > 0) {
             throw LuaScriptException(name, "Script SHA not found in cache even after on-demand load attempt for: " + name);
         }
-
-        // First attempt (attempt == 0) and SHA not found: try on-demand load
-        lock.unlock(); // Unlock before calling load_script
-
-        // std::cerr << "INFO: Lua script '" << name << "' not found in cache. Attempting on-demand load." << std::endl;
-        attempted_on_demand_load = true; // Mark that we are trying/tried
+        lock.unlock();
+        attempted_on_demand_load = true;
         const std::string* script_body_ptr = get_script_body_by_name(name);
 
         if (!script_body_ptr) {
             throw LuaScriptException(name, "Script body not found for on-demand loading of script: " + name);
         }
-
         try {
-            load_script(name, *script_body_ptr); // This will populate script_shas_ if successful
-            // std::cerr << "INFO: Successfully loaded Lua script '" << name << "' on demand." << std::endl;
-            // Loop will continue to re-acquire lock and find SHA.
+            load_script(name, *script_body_ptr);
         } catch (const RedisJSONException& e) {
-            // std::cerr << "ERROR: Failed to load Lua script '" << name << "' on demand: " << e.what() << std::endl;
             throw LuaScriptException(name, "Failed to load script '" + name + "' on demand: " + std::string(e.what()));
         }
-        // After load_script, loop iterates, re-locks and re-checks script_shas_.
     }
 
-    if (sha1_hash.empty()) { // Should be caught by the check inside the loop if load failed
+    if (sha1_hash.empty()) {
         throw LuaScriptException(name, "Failed to obtain SHA1 for script: " + name + " after load attempts.");
     }
 
-    // Use RedisConnectionPtr which includes the custom deleter
     RedisConnectionManager::RedisConnectionPtr conn_guard = connection_manager_->get_connection();
     RedisConnection* conn = conn_guard.get();
      if (!conn || !conn->is_connected()) {
@@ -1580,34 +1511,22 @@ json LuaScriptManager::execute_script(const std::string& name,
 
     if (reply->type == REDIS_REPLY_ERROR && strncmp(reply->str, "NOSCRIPT", 8) == 0) {
         std::string noscript_error_msg = std::string(reply->str, reply->len);
-        // In a more robust system, one might attempt to reload the specific script here.
-        // For now, just propagate the error clearly.
         throw LuaScriptException(name, "Script not found on server (NOSCRIPT): " + noscript_error_msg + ". Consider reloading scripts if SCRIPT FLUSH occurred.");
     }
-    // If the reply is an error from the script itself (not NOSCRIPT), redis_reply_to_json will throw LuaScriptException.
     return redis_reply_to_json(reply.get());
 }
 
 void LuaScriptManager::preload_builtin_scripts() {
-    // Iterate over the SCRIPT_DEFINITIONS map to preload all defined scripts.
-    // std::cout << "LOG: LuaScriptManager::preload_builtin_scripts() - Entry. Thread ID: " << std::this_thread::get_id() << std::endl;
     int success_count = 0;
     int fail_count = 0;
-    int script_idx = 0;
-
     for (const auto& pair : SCRIPT_DEFINITIONS) {
-        script_idx++;
         const std::string& script_name = pair.first;
         const std::string* script_body = pair.second;
-        // std::cout << "LOG: LuaScriptManager::preload_builtin_scripts() - Attempting to load script " << script_idx << "/" << SCRIPT_DEFINITIONS.size() << ": '" << script_name << "'. Thread ID: " << std::this_thread::get_id() << std::endl;
         try {
             load_script(script_name, *script_body);
-            // std::cout << "LOG: LuaScriptManager::preload_builtin_scripts() - Successfully preloaded script: '" << script_name << "'. Thread ID: " << std::this_thread::get_id() << std::endl;
             success_count++;
         } catch (const RedisJSONException& e) {
             fail_count++;
-            // Using std::cerr for warnings/errors is conventional, but sticking to cout if all logs go there.
-            // For now, commenting out as per instruction. If actual logging framework is used, this would be a proper log_warning.
             // std::cerr << "WARNING: LuaScriptManager::preload_builtin_scripts() - Failed to preload Lua script '" << script_name << "' (RedisJSONException): " << e.what() << ". Thread ID: " << std::this_thread::get_id() << std::endl;
         } catch (const std::exception& e) {
             fail_count++;
@@ -1619,16 +1538,8 @@ void LuaScriptManager::preload_builtin_scripts() {
             // std::cerr << "WARNING: LuaScriptManager::preload_builtin_scripts() - Unknown error while preloading Lua script '" << script_name << "'. Thread ID: " << std::this_thread::get_id() << std::endl;
         }
         #endif
-        // std::cout << "LOG: LuaScriptManager::preload_builtin_scripts() - Finished attempt for script '" << script_name << "'. Thread ID: " << std::this_thread::get_id() << std::endl;
     }
-
-    if (fail_count > 0) {
-        // std::cout << "LOG: LuaScriptManager::preload_builtin_scripts() - Preloading completed. Success: " << success_count
-        //           << ", Failed: " << fail_count << " (out of " << SCRIPT_DEFINITIONS.size() << " total). Thread ID: " << std::this_thread::get_id() << std::endl;
-    } else {
-        // std::cout << "LOG: LuaScriptManager::preload_builtin_scripts() - Successfully preloaded all " << success_count << " built-in Lua scripts. Thread ID: " << std::this_thread::get_id() << std::endl;
-    }
-    // std::cout << "LOG: LuaScriptManager::preload_builtin_scripts() - Exit. Thread ID: " << std::this_thread::get_id() << std::endl;
+    // Logging for preload summary can be added here if needed
 }
 
 bool LuaScriptManager::is_script_loaded(const std::string& name) const {
@@ -1637,7 +1548,6 @@ bool LuaScriptManager::is_script_loaded(const std::string& name) const {
 }
 
 void LuaScriptManager::clear_all_scripts_cache() {
-    // Use RedisConnectionPtr which includes the custom deleter
     RedisConnectionManager::RedisConnectionPtr conn_guard = connection_manager_->get_connection();
     RedisConnection* conn = conn_guard.get();
     if (!conn || !conn->is_connected()) {
