@@ -21,44 +21,94 @@ local function parse_path(path_str)
     if path_str == nil or path_str == '$' or path_str == '' then
         return segments -- Root path
     end
-    path_str = path_str:gsub('^%$%.', ''):gsub('^%$%[', '[')
+    path_str = path_str:gsub('^%$%.', ''):gsub('^%$%[', '[') -- Remove $., $[ at start
 
     local current_pos = 1
-    while current_pos <= #path_str do
-        local key_match = path_str:match('^([^%.%[]+)', current_pos)
-        if key_match then
-            -- If key_match itself contains escaped dots or brackets, this simple parser won't handle it.
-            -- Assuming simple keys for now, or keys are pre-escaped/quoted if needed by a more complex path spec.
-            table.insert(segments, key_match)
-            current_pos = current_pos + #key_match
+    local path_len = #path_str
+
+    -- Enhanced checks for leading/trailing dots and empty initial/final segments
+    if path_len > 0 then
+        if path_str:sub(1,1) == '.' then
+            return redis.error_reply("ERR_PATH Malformed path: Leading dot in path: " .. path_str)
+        end
+        -- Note: Trailing dot is implicitly handled by loop logic; if a segment ends and then a dot is encountered
+        -- with nothing after, it might need specific check or rely on segment_str being empty if current_pos advances past len.
+        -- The original code had a 'break' for trailing dot, which we might want to make an error.
+    end
+
+    while current_pos <= path_len do
+        local next_dot_pos = path_str:find('%.', current_pos)
+        local next_bracket_pos = path_str:find('%[', current_pos)
+        local segment_end_pos
+
+        -- Determine end of current path segment (before a dot or bracket, or end of string)
+        if next_dot_pos and (not next_bracket_pos or next_dot_pos < next_bracket_pos) then
+            segment_end_pos = next_dot_pos - 1
+        elseif next_bracket_pos and (not next_dot_pos or next_bracket_pos < next_dot_pos) then
+            segment_end_pos = next_bracket_pos - 1
         else
-            -- This case implies we are at a bracket or end of string after a dot.
-            -- If not at a bracket, and not end of string, it might be an error or complex path.
+            segment_end_pos = path_len -- End of the string
         end
 
-        if current_pos <= #path_str then
-            local char = path_str:sub(current_pos, current_pos)
-            if char == '.' then
-                if current_pos == #path_str then -- Trailing dot
-                    --redis.log(redis.LOG_WARNING, "Path ends with a dot: " .. path_str)
-                    break -- Path ends with a dot, ignore.
+        local segment_str = path_str:sub(current_pos, segment_end_pos)
+
+        if segment_str == '' and current_pos <= path_len and path_str:sub(current_pos, current_pos) ~= '[' then
+            -- An empty segment means '..' or an initial '.' not caught, or some other malformation.
+            -- Allow empty segment if it's immediately followed by '[' (e.g. path like '[0]' for root array access)
+            -- This specific case (root array access like "[0]") is typically handled by path_str:gsub at start or by specific logic.
+            -- For now, let's assume path like "[0]" is not passed to this generic segment parser part or is pre-processed.
+            -- If `segment_str` is empty here, it implies an issue like `a..b` or `a.[0]`.
+            return redis.error_reply("ERR_PATH Malformed path: Empty segment found in path: '" .. path_str .. "' near position " .. current_pos)
+        end
+
+        if segment_str ~= '' then -- Only add non-empty segments if we are not parsing a root array index
+             table.insert(segments, segment_str)
+        end
+        current_pos = segment_end_pos + 1
+
+        if current_pos <= path_len then
+            local char_at_current_pos = path_str:sub(current_pos, current_pos)
+            if char_at_current_pos == '.' then
+                current_pos = current_pos + 1 -- Consume the dot
+                if current_pos > path_len or path_str:sub(current_pos, current_pos) == '.' or path_str:sub(current_pos, current_pos) == '[' then
+                    -- Path ends with a dot, or has '..', or '.['
+                    return redis.error_reply("ERR_PATH Malformed path: Invalid sequence after dot in path: '" .. path_str .. "' near position " .. current_pos)
                 end
-                current_pos = current_pos + 1 -- Skip dot
-            elseif char == '[' then
+            elseif char_at_current_pos == '[' then
+                -- If segment_str was empty, it means path started with '[' or was like '.['
+                -- This part handles the bracket and its content.
                 local end_bracket_pos = path_str:find(']', current_pos)
                 if not end_bracket_pos then
                     return redis.error_reply("ERR_PATH Malformed path: Unmatched '[' in path: " .. path_str)
                 end
                 local index_str = path_str:sub(current_pos + 1, end_bracket_pos - 1)
+                if index_str == '' then
+                    return redis.error_reply("ERR_PATH Malformed path: Empty index '[]' in path: " .. path_str)
+                end
                 local index_num = tonumber(index_str)
                 if index_num == nil then
                      return redis.error_reply("ERR_PATH Malformed path: Non-numeric index '" .. index_str .. "' in path: " .. path_str)
                 end
+                -- If the previous segment was a string key, it's already added.
+                -- If path was just "[0]", segment_str would be empty. Add index to segments.
+                -- If segments is empty and we are parsing an index, it means path like "[0].field"
+                if segment_str == '' and #segments == 0 then
+                    -- This handles paths that *start* with an index, e.g. "[0].name" after initial $ stripping
+                    -- The previous logic would have added an empty string for segment_str if path was like "[0]"
+                    -- We need to ensure that if segment_str is empty, we don't just skip.
+                    -- This should be fine as table.insert(segments, index_num + 1) happens below.
+                elseif segment_str == '' and #segments > 0 then
+                     -- This means something like "key.[]" which is invalid. The previous segment was "key".
+                     -- An empty string segment followed by '[' should be an error.
+                     return redis.error_reply("ERR_PATH Malformed path: Invalid '[]' after non-empty segment in path: " .. path_str)
+                end
+
                 table.insert(segments, index_num + 1) -- Lua arrays are 1-indexed
                 current_pos = end_bracket_pos + 1
             else
-                -- Unexpected character in path
-                return redis.error_reply("ERR_PATH Malformed path: Unexpected character '" .. char .. "' at pos " .. current_pos .. " in path: " .. path_str)
+                -- This case should ideally not be reached if segment parsing is correct.
+                -- It implies a character that is not a dot or bracket, but segment_end_pos was calculated before it.
+                return redis.error_reply("ERR_PATH Malformed path: Unexpected character '" .. char_at_current_pos .. "' at pos " .. current_pos .. " in path: " .. path_str)
             end
         end
     end
