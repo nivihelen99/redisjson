@@ -98,16 +98,19 @@ long long RedisJSONClient::arrindex(const std::string& key,
             target_array_node = _json_modifier->get(doc, _path_parser->parse(path));
         } catch (const PathNotFoundException&) {
             // If _json_modifier->get throws PathNotFoundException when path doesn't exist in doc
-            throw PathNotFoundException(key, path, "Path does not exist in document for ARRINDEX.");
+            // Corrected PathNotFoundException call
+            throw PathNotFoundException(key, path);
         } catch (const std::exception& e) { // Catch other potential errors from get/parse
              throw InvalidPathException("Error accessing path '" + path + "' for ARRINDEX: " + e.what());
         }
 
         if (!target_array_node.is_array()) {
-            throw TypeMismatchException(key, path, "array", target_array_node.type_name(), "Target for ARRINDEX is not an array.");
+            // Corrected TypeMismatchException call
+            throw TypeMismatchException(path, "array", target_array_node.type_name());
         }
         if (!value_to_find.is_primitive() && !value_to_find.is_null()) {
-             throw TypeMismatchException(key, path, "scalar", value_to_find.type_name(), "Search value for ARRINDEX must be a scalar (string, number, boolean, null).");
+            // Corrected TypeMismatchException call
+             throw TypeMismatchException(path, "scalar", value_to_find.type_name());
         }
 
         long long current_start_idx = 0;
@@ -1532,5 +1535,8 @@ long long RedisJSONClient::json_clear(const std::string& key, const std::string&
     // Fix 5: Control reaches end of non-void function
     throw RedisJSONException("Reached end of non-void function json_clear unexpectedly");
 }
+
+// Removing the duplicated arrindex that was here.
+// The correct one is earlier in the file (around original line 86) and has been fixed.
 
 } // namespace redisjson
