@@ -308,7 +308,7 @@ void run_sparse_merge_operations(redisjson::RedisJSONClient& client) {
 
     // 1. Initial document setup
     json initial_settings = {
-        {"username", "biff_carson"},
+        {"username", "Biff Larsen"},
         {"theme", "light"},
         {"notifications", {
             {"email", true},
