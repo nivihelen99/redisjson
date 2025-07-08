@@ -1236,11 +1236,30 @@ local function do_clear_recursive(target_value, is_target_array_hint)
                     item_modified_this_iteration = true
                 end
             elseif type(v) == 'table' then
-                local sub_is_array_hint = nil; local sub_n_keys = 0;
-                if next(v) == nil then sub_is_array_hint = true; else
-                    for sk_sub,_ in pairs(v) do sub_n_keys = sub_n_keys+1; if type(sk_sub)~='number' or sk_sub<1 or sk_sub>sub_n_keys then sub_is_array_hint=false; break; end end
-                    if sub_is_array_hint == nil and #v ~= sub_n_keys then sub_is_array_hint = false; end
-                    if sub_is_array_hint == nil then sub_is_array_hint = true; end -- Defaulting to true
+                local sub_is_array_hint -- Declare hint
+
+                if next(v) == nil then -- If 'v' is an empty table
+                    local v_metatable = getmetatable(v)
+                    if v_metatable and v_metatable.__array == true then
+                        sub_is_array_hint = true
+                    else
+                        sub_is_array_hint = false -- Explicitly false if no metatable or no __array=true for empty table
+                    end
+                else -- 'v' is not empty, determine by keys
+                    sub_is_array_hint = true -- Assume array initially
+                    local sub_n_keys = 0
+                    for sk_sub,_ in pairs(v) do
+                        sub_n_keys = sub_n_keys + 1
+                        if type(sk_sub) ~= 'number' or sk_sub < 1 or sk_sub > sub_n_keys then
+                            sub_is_array_hint = false
+                            break
+                        end
+                    end
+                    if sub_is_array_hint and #v ~= sub_n_keys then -- Check for sparseness if still considered array
+                        sub_is_array_hint = false
+                    end
+                    -- If sub_is_array_hint is still true here, it passed all checks for being an array.
+                    -- If it became false, it was determined to be an object.
                 end
 
                 local sub_cleared_count, sub_modified = do_clear_recursive(v, sub_is_array_hint)
