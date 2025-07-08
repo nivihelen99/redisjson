@@ -113,6 +113,7 @@ private:
     static const std::string JSON_SPARSE_MERGE_LUA; // Added declaration
     static const std::string JSON_OBJECT_KEYS_LUA;
     static const std::string JSON_NUMINCRBY_LUA;
+    static const std::string JSON_OBJECT_LENGTH_LUA; // Added for JSON.OBJLEN
     // ... other built-in scripts
 };
 

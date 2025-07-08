@@ -715,6 +715,91 @@ const std::string LuaScriptManager::JSON_NUMINCRBY_LUA = LUA_COMMON_HELPERS + R"
     return cjson.encode(new_value) -- Return the new value, JSON encoded
 )lua";
 
+const std::string LuaScriptManager::JSON_OBJECT_LENGTH_LUA = LUA_COMMON_HELPERS + R"lua(
+-- Script for JSON.OBJLEN (emulated)
+-- KEYS[1] - The key where the JSON document is stored
+-- ARGV[1] - The path to the object within the JSON document. Defaults to root '$' if not provided or empty.
+
+local key = KEYS[1]
+local path_str = ARGV[1]
+
+-- Get the JSON string from Redis
+local current_json_str = redis.call('GET', key)
+if not current_json_str then
+    return nil -- Key not found, return nil (RedisJSON behavior for JSON.OBJLEN on non-existent key)
+end
+
+-- Decode the JSON string
+local current_doc, err_decode = cjson.decode(current_json_str)
+if not current_doc then
+    return redis.error_reply('ERR_DECODE Failed to decode JSON for key ' .. key .. ': ' .. (err_decode or 'unknown error'))
+end
+
+local target_value = current_doc
+if path_str ~= '$' and path_str ~= '' and path_str ~= nil then
+    local path_segments = parse_path(path_str)
+    if path_segments == nil or (type(path_segments) == 'table' and path_segments.err) then
+         return redis.error_reply('ERR_PATH Invalid path string: ' .. path_str .. (path_segments.err or ''))
+    end
+    if #path_segments > 0 then
+        target_value = get_value_at_path(current_doc, path_segments)
+    end
+end
+
+-- Check if the target value exists at the path
+if target_value == nil then
+    return nil -- Path does not lead to a value, return nil (RedisJSON behavior)
+end
+
+-- Check if the target is a table (potential object or array)
+if type(target_value) ~= 'table' then
+    return redis.error_reply('ERR_TYPE Path value is not an object or array, it is a ' .. type(target_value))
+end
+
+-- Check if it's an object (not an array).
+-- Similar heuristic to JSON.OBJKEYS: an array has numeric keys 1..N and its length #target_value is N.
+-- An empty table {} could be an empty object or an empty array. OBJLEN on empty array is an error in RedisJSON.
+-- OBJLEN on empty object returns 0.
+local is_array = true
+local n = 0
+local first_key = next(target_value)
+
+if first_key == nil then -- Empty table: {}
+    is_array = false -- Treat empty table as an object for OBJLEN, returning 0
+else
+    for k,v in pairs(target_value) do
+        n = n + 1
+        -- A robust check for array: all keys must be numbers, sequential, starting from 1.
+        -- cjson decodes JSON arrays into Lua tables with integer keys 1..N.
+        -- cjson decodes JSON objects into Lua tables with string keys (or mixed if original object had numeric strings as keys).
+        if type(k) ~= 'number' then
+            is_array = false
+            break
+        end
+    end
+    if is_array then -- All keys were numbers
+        if #target_value ~= n then -- Check for sparseness or non-sequential keys if all were numbers
+            is_array = false -- e.g. {1='a', 3='c'} is an object-like table, not a dense array
+        end
+    end
+end
+
+if is_array then
+    -- RedisJSON v2.0.x JSON.OBJLEN on an array returns: "ERR element at path is not an object"
+    -- RedisJSON v2.4.x+ JSON.OBJLEN on an array might return nil or specific error.
+    -- Let's be consistent with error for non-object.
+    return redis.error_reply('ERR_TYPE Path value is an array, not an object')
+end
+
+-- Count keys in the object
+local key_count = 0
+for _ in pairs(target_value) do
+    key_count = key_count + 1
+end
+
+return key_count
+)lua";
+
 LuaScriptManager::LuaScriptManager(RedisConnectionManager* conn_manager)
     : connection_manager_(conn_manager) {
     if (!conn_manager) {
@@ -812,7 +897,8 @@ const std::map<std::string, const std::string*> LuaScriptManager::SCRIPT_DEFINIT
     {"json_sparse_merge", &LuaScriptManager::JSON_SPARSE_MERGE_LUA},
     {"json_object_keys", &LuaScriptManager::JSON_OBJECT_KEYS_LUA},
     // Add any other scripts here if they are defined as static const std::string members
-    {"json_numincrby", &LuaScriptManager::JSON_NUMINCRBY_LUA}
+    {"json_numincrby", &LuaScriptManager::JSON_NUMINCRBY_LUA},
+    {"json_object_length", &LuaScriptManager::JSON_OBJECT_LENGTH_LUA}
 };
 
 const std::string* LuaScriptManager::get_script_body_by_name(const std::string& name) const {

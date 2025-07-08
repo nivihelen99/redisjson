@@ -256,6 +256,13 @@ if (cas_success) {
 } else {
     std::cout << "CAS failed. Version was not 1 (or path didn't exist)." << std::endl;
 }
+
+// Get object keys or length
+std::vector<std::string> keys = client.object_keys(doc_key, "address");
+std::optional<size_t> len = client.object_length(doc_key, "address");
+if (len) {
+    std::cout << "Address object has " << *len << " keys." << std::endl;
+}
 ```
 
 ## API Overview

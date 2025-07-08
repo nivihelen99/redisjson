@@ -495,6 +495,79 @@ void run_object_operations(redisjson::RedisJSONClient& client) {
             std::cerr << "VERIFICATION ERROR: Keys for non-existent path should be empty." << std::endl;
         }
 
+        // --- JSON.OBJLEN Examples ---
+        std::cout << "\n--- JSON.OBJLEN (object_length) Examples ---" << std::endl;
+
+        // 6. Get length of the root object
+        std::optional<size_t> root_len = client.object_length(obj_key);
+        if (root_len) {
+            std::cout << "SUCCESS: Length of root object: " << *root_len << std::endl;
+            if (*root_len != 5) std::cerr << "VERIFICATION ERROR: Root object length should be 5." << std::endl;
+        } else {
+            std::cerr << "ERROR: Could not get length of root object." << std::endl;
+        }
+
+        // 7. Get length of a nested object 'notifications'
+        std::optional<size_t> notification_len = client.object_length(obj_key, "notifications");
+        if (notification_len) {
+            std::cout << "SUCCESS: Length of 'notifications' object: " << *notification_len << std::endl;
+            if (*notification_len != 3) std::cerr << "VERIFICATION ERROR: 'notifications' object length should be 3." << std::endl;
+        } else {
+            std::cerr << "ERROR: Could not get length of 'notifications' object." << std::endl;
+        }
+
+        // 8. Get length of an empty nested object 'empty_obj'
+        std::optional<size_t> empty_obj_len = client.object_length(obj_key, "empty_obj");
+        if (empty_obj_len) {
+            std::cout << "SUCCESS: Length of 'empty_obj' object: " << *empty_obj_len << std::endl;
+            if (*empty_obj_len != 0) std::cerr << "VERIFICATION ERROR: 'empty_obj' length should be 0." << std::endl;
+        } else {
+            std::cerr << "ERROR: Could not get length of 'empty_obj' object." << std::endl;
+        }
+
+        // 9. Attempt to get length from a path that is not an object (e.g., a string value 'theme')
+        std::cout << "\nATTEMPT: Length of path 'theme' (a string value):" << std::endl;
+        try {
+            std::optional<size_t> string_path_len = client.object_length(obj_key, "theme");
+            if (string_path_len) {
+                 std::cerr << "VERIFICATION ERROR: object_length for 'theme' (string) should be std::nullopt or throw, got " << *string_path_len << std::endl;
+            } else {
+                std::cout << "  (Correctly got std::nullopt as 'theme' is not an object)" << std::endl;
+            }
+        } catch (const redisjson::LuaScriptException& e) {
+            std::cout << "  (Correctly caught LuaScriptException as 'theme' is not an object: " << e.what() << ")" << std::endl;
+        } catch (const redisjson::RedisJSONException& e) { // Broader catch for other client errors
+            std::cout << "  (Caught RedisJSONException as 'theme' is not an object: " << e.what() << ")" << std::endl;
+        }
+
+
+        // 10. Attempt to get length from a non-existent path 'settings.advanced'
+        std::cout << "\nATTEMPT: Length of non-existent path 'settings.advanced':" << std::endl;
+        std::optional<size_t> non_existent_path_len = client.object_length(obj_key, "settings.advanced");
+        if (non_existent_path_len) {
+            std::cerr << "VERIFICATION ERROR: object_length for non-existent path should be std::nullopt, got " << *non_existent_path_len << std::endl;
+        } else {
+            std::cout << "  (Correctly got std::nullopt as path does not exist)" << std::endl;
+        }
+
+        // 11. Attempt to get length from a path that is an array (e.g. user_preferences.hobbies if it existed)
+        // Let's add an array to test this specifically.
+        json temp_array_data = R"({"my_array": [1,2,3]})"_json;
+        client.set_path(obj_key, "my_array_holder", temp_array_data);
+        std::cout << "\nATTEMPT: Length of path 'my_array_holder.my_array' (an array):" << std::endl;
+        try {
+            std::optional<size_t> array_path_len = client.object_length(obj_key, "my_array_holder.my_array");
+            if (array_path_len) {
+                 std::cerr << "VERIFICATION ERROR: object_length for an array path should be std::nullopt or throw, got " << *array_path_len << std::endl;
+            } else {
+                 std::cout << "  (Correctly got std::nullopt as path points to an array)" << std::endl;
+            }
+        } catch (const redisjson::LuaScriptException& e) {
+            std::cout << "  (Correctly caught LuaScriptException as path points to an array: " << e.what() << ")" << std::endl;
+        } catch (const redisjson::RedisJSONException& e) {
+             std::cout << "  (Caught RedisJSONException as path points to an array: " << e.what() << ")" << std::endl;
+        }
+
 
     } catch (const redisjson::RedisJSONException& e) {
         std::cerr << "ERROR in Object Operations: " << e.what() << std::endl;
