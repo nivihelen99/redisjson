@@ -198,13 +198,96 @@ end
 
 const std::string LUA_HELPER_EMPTY_ARRAY_FUNC = R"lua(
 local function empty_array()
+    -- This function is still used by JSON_ARRAY_TRIM_LUA when it creates a *new* array
+    -- that might be empty. The sentinel replacement logic will handle it if it remains empty.
     local arr = {}
     setmetatable(arr, { __array = true })
     return arr
 end
 )lua";
 
-const std::string LUA_COMMON_HELPERS = LUA_HELPER_PARSE_PATH_FUNC + LUA_HELPER_GET_VALUE_AT_PATH_FUNC + LUA_HELPER_SET_VALUE_AT_PATH_FUNC + LUA_HELPER_DEL_VALUE_AT_PATH_FUNC + LUA_HELPER_EMPTY_ARRAY_FUNC;
+const std::string LUA_EMPTY_ARRAY_SENTINEL_DEF = R"lua(
+local EMPTY_ARRAY_SENTINEL = "__EMPTY_ARRAY_SENTINEL_PLACEHOLDER__"
+)lua";
+
+const std::string LUA_REPLACE_EMPTY_ARRAYS_RECURSIVE_FUNC = LUA_EMPTY_ARRAY_SENTINEL_DEF + R"lua(
+local function replace_empty_arrays_with_sentinel_recursive(doc_table)
+    if type(doc_table) ~= 'table' then
+        return
+    end
+
+    -- Determine if current doc_table is an array or object to guide iteration
+    local is_array_heuristic = true
+    local n = 0
+    if next(doc_table) == nil then -- Empty table, could be {} or []
+        -- If it has __array metatable true, it's an array. Otherwise, could be object.
+        -- For our purpose, if it's empty, it will be replaced if it's supposed to be an array.
+        -- The caller (JSON_CLEAR or JSON_ARRAY_TRIM) should ensure it's marked if it's an array.
+    else
+        for k, v_val in pairs(doc_table) do
+            n = n + 1
+            if type(k) ~= 'number' or k < 1 or k > n then -- Basic check
+                is_array_heuristic = false
+                break
+            end
+        end
+        if is_array_heuristic and #doc_table ~= n then -- Check for sparseness
+            is_array_heuristic = false
+        end
+    end
+
+    if is_array_heuristic then -- Iterate as an array (or potential array)
+        for i = 1, #doc_table do
+            local value = doc_table[i]
+            if type(value) == 'table' then
+                local mt = getmetatable(value)
+                if mt and mt.__array and #value == 0 and next(value) == nil then
+                    doc_table[i] = EMPTY_ARRAY_SENTINEL
+                else
+                    replace_empty_arrays_with_sentinel_recursive(value)
+                    -- After recursion, check again if it became an empty array
+                    if type(doc_table[i]) == 'table' then -- Check if it wasn't replaced by sentinel in recursive call
+                        local mt_after = getmetatable(doc_table[i])
+                        if mt_after and mt_after.__array and #doc_table[i] == 0 and next(doc_table[i]) == nil then
+                             doc_table[i] = EMPTY_ARRAY_SENTINEL
+                        end
+                    end
+                end
+            end
+        end
+    else -- Iterate as an object
+        local keys_to_iterate = {}
+        for k_obj, _ in pairs(doc_table) do table.insert(keys_to_iterate, k_obj) end
+
+        for _, key in ipairs(keys_to_iterate) do
+            local value = doc_table[key]
+            if type(value) == 'table' then
+                local mt = getmetatable(value)
+                if mt and mt.__array and #value == 0 and next(value) == nil then
+                    doc_table[key] = EMPTY_ARRAY_SENTINEL
+                else
+                    replace_empty_arrays_with_sentinel_recursive(value)
+                     -- After recursion, check again if it became an empty array
+                    if type(doc_table[key]) == 'table' then
+                        local mt_after = getmetatable(doc_table[key])
+                        if mt_after and mt_after.__array and #doc_table[key] == 0 and next(doc_table[key]) == nil then
+                            doc_table[key] = EMPTY_ARRAY_SENTINEL
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+)lua";
+
+
+const std::string LUA_COMMON_HELPERS = LUA_HELPER_PARSE_PATH_FUNC +
+                                   LUA_HELPER_GET_VALUE_AT_PATH_FUNC +
+                                   LUA_HELPER_SET_VALUE_AT_PATH_FUNC +
+                                   LUA_HELPER_DEL_VALUE_AT_PATH_FUNC +
+                                   LUA_HELPER_EMPTY_ARRAY_FUNC +
+                                   LUA_REPLACE_EMPTY_ARRAYS_RECURSIVE_FUNC;
 
 const std::string LuaScriptManager::JSON_PATH_GET_LUA = LUA_COMMON_HELPERS + R"lua(
     local key = KEYS[1]
@@ -1297,10 +1380,17 @@ else -- Path is not root
 end
 
 if doc_modified_overall then
+    -- Replace empty arrays with sentinel BEFORE encoding
+    replace_empty_arrays_with_sentinel_recursive(current_doc)
+
     local new_doc_json_str, err_encode = cjson.encode(current_doc)
     if not new_doc_json_str then
         return redis.error_reply('ERR_ENCODE Failed to encode document after CLEAR: ' .. (err_encode or 'unknown error'))
     end
+
+    -- Replace sentinel string with actual empty array JSON '[]' AFTER encoding
+    new_doc_json_str = string.gsub(new_doc_json_str, '"' .. EMPTY_ARRAY_SENTINEL .. '"', '[]')
+
     redis.call('SET', key, new_doc_json_str)
 end
 
@@ -1418,12 +1508,14 @@ end
 if start_idx > stop_idx or array_len == 0 then
     -- Target array becomes empty
     if is_root_path then
-        current_doc = empty_array() -- Special empty array with metatable for cjson
+        -- current_doc = empty_array() -- Old way
+        current_doc = EMPTY_ARRAY_SENTINEL -- Replace with sentinel
     else
-        -- Need to set the new empty array back at the path
+        -- Need to set the new empty array (sentinel) back at the path
         local path_segments = parse_path(path_str) -- Re-parse, error checked above
-        local success, err_set = set_value_at_path(current_doc, path_segments, empty_array(), false)
-        if not success then return redis.error_reply('ERR_SET_PATH Failed to set empty array: ' .. err_set) end
+        -- local success, err_set = set_value_at_path(current_doc, path_segments, empty_array(), false) -- Old way
+        local success, err_set = set_value_at_path(current_doc, path_segments, EMPTY_ARRAY_SENTINEL, false)
+        if not success then return redis.error_reply('ERR_SET_PATH Failed to set empty array sentinel: ' .. err_set) end
     end
 else
     -- Convert 0-based normalized start/stop to 1-based Lua indices for iteration
@@ -1444,27 +1536,78 @@ else
     end
 end
 
+-- Before encoding, ensure any other empty arrays in the document are also marked with sentinel
+if type(current_doc) == 'table' then -- Only if current_doc is a table (not already a sentinel itself)
+    replace_empty_arrays_with_sentinel_recursive(current_doc)
+end
+
 local new_doc_json_str, err_encode = cjson.encode(current_doc)
 if not new_doc_json_str then
     return redis.error_reply('ERR_ENCODE Failed to encode document after array trim: ' .. (err_encode or 'unknown error'))
 end
 
+-- Replace sentinel string with actual empty array JSON '[]' AFTER encoding
+new_doc_json_str = string.gsub(new_doc_json_str, '"' .. EMPTY_ARRAY_SENTINEL .. '"', '[]')
+
 redis.call('SET', key, new_doc_json_str)
 
 -- Get the length of the array *at the path* after modification.
--- If the path was root, current_doc is the array.
--- If path was not root, we need to re-fetch the (potentially new) array at path.
-local final_array_at_path = current_doc
-if not is_root_path then
+local final_array_at_path_value -- Can be table, sentinel, or nil
+if is_root_path then
+    -- If root was set to sentinel, current_doc is the sentinel string.
+    -- If root was trimmed to an actual array, current_doc is that array table.
+    -- cjson.encode would have been called on it. For length, we need the Lua representation.
+    -- This is tricky because current_doc was just encoded. We need the state *before* encode for length.
+    -- Let's re-evaluate: the `new_array` or the `EMPTY_ARRAY_SENTINEL` is what we need length of.
+
+    if start_idx > stop_idx or array_len == 0 then -- Condition for empty array
+        final_array_at_path_value = EMPTY_ARRAY_SENTINEL
+    else
+        final_array_at_path_value = new_array -- This was the new array table
+    end
+else
+    -- Path was not root. We need to get the value from the modified current_doc structure.
+    -- The replace_empty_arrays_with_sentinel_recursive might have changed it.
+    -- And set_value_at_path would have placed either `new_array` or `EMPTY_ARRAY_SENTINEL`.
+    -- We need to re-get it from the *Lua table structure* before it was JSON encoded.
     local path_segments_final = parse_path(path_str)
-    final_array_at_path = get_value_at_path(current_doc, path_segments_final)
-    if final_array_at_path == nil or type(final_array_at_path) ~= 'table' then
-        -- This should not happen if set_value_at_path was successful.
-        return redis.error_reply('ERR_INTERNAL Could not retrieve array after trim to determine length')
+    if path_segments_final then
+         -- IMPORTANT: get_value_at_path should operate on the Lua table `current_doc`
+         -- *before* it's potentially replaced by EMPTY_ARRAY_SENTINEL if it was root.
+         -- If current_doc became EMPTY_ARRAY_SENTINEL (root case), this path access is invalid.
+         -- This logic needs to be careful based on what `current_doc` is.
+
+        if type(current_doc) == 'table' then
+            final_array_at_path_value = get_value_at_path(current_doc, path_segments_final)
+        elseif current_doc == EMPTY_ARRAY_SENTINEL and is_root_path then
+             -- This case is already handled by the is_root_path block above.
+             -- This path means current_doc is a sentinel, so path access is not meaningful for length.
+             -- This should align with the `final_array_at_path_value` set in the is_root_path block.
+        else
+            -- Fallback or error if current_doc is not a table and not root sentinel
+            return redis.error_reply('ERR_INTERNAL_TRIM Cannot determine final array state for length calculation.')
+        end
+    else
+        return redis.error_reply('ERR_INTERNAL_TRIM Invalid path for final length calculation.')
     end
 end
 
-return #final_array_at_path
+local final_length = 0
+if type(final_array_at_path_value) == 'table' then
+    final_length = #final_array_at_path_value
+elseif final_array_at_path_value == EMPTY_ARRAY_SENTINEL then
+    final_length = 0
+else
+    -- If final_array_at_path_value is nil (e.g. path didn't exist in current_doc after modifications)
+    -- or some other type, this implies an issue or that the path no longer points to an array/sentinel.
+    -- For a successful trim, it should be one of the above.
+    -- If an error occurred setting it, it would have returned earlier.
+    -- If path points to something else not set by this script, it's an issue.
+    -- Defaulting to 0, but ideally this state shouldn't be reached if logic is correct.
+    final_length = 0 -- Or perhaps an error, but RedisJSON typically returns a length.
+end
+
+return final_length
 )lua";
 
 LuaScriptManager::LuaScriptManager(RedisConnectionManager* conn_manager)
