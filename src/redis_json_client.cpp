@@ -1315,4 +1315,43 @@ json RedisJSONClient::_parse_json_reply(const std::string& reply_str, const std:
     }
 }
 
+// ... other method implementations ...
+
+long long RedisJSONClient::json_clear(const std::string& key, const std::string& path) {
+    if (key.empty()) {
+        throw ArgumentInvalidException("Key cannot be empty for JSON.CLEAR operation.");
+    }
+    // Path can be empty (which defaults to '$' in Lua script) or explicitly '$'.
+
+    try {
+        json result_json = lua_script_manager_->execute_script(
+            "json_clear",
+            {key},            // KEYS
+            {path}            // ARGV
+        );
+
+        if (result_json.is_number_integer()) {
+            return result_json.get<long long>();
+        } else if (result_json.is_null()) {
+            return 0;
+        }
+        else if (result_json.is_string()) {
+            throw RedisJSONException("JSON.CLEAR script returned an unexpected string: " + result_json.get<std::string>());
+        }
+        else {
+            throw TypeMismatchException("JSON.CLEAR", "Unexpected result type from Lua script: " + result_json.type_name());
+        }
+    } catch (const LuaScriptException& e) {
+        std::string what_str = e.what();
+        if (what_str.find("ERR document not found") != std::string::npos) {
+            throw PathNotFoundException(key, path, "Document not found for JSON.CLEAR operation on non-root path.", e.script_name());
+        }
+        throw;
+    } catch (const RedisJSONException& e) {
+        throw;
+    } catch (const std::exception& e) {
+        throw JsonParsingException("Failed to parse result for JSON.CLEAR: " + std::string(e.what()));
+    }
+}
+
 } // namespace redisjson

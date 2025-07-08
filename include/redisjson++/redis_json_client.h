@@ -118,6 +118,23 @@ public:
     // Path defaults to root '$' if not specified.
     std::optional<size_t> object_length(const std::string& key, const std::string& path = "$");
 
+    /**
+     * @brief Clears containers (arrays become empty, objects' numbers become 0 and contained arrays are emptied)
+     *        or "touches" scalars at a given path. Corresponds to JSON.CLEAR.
+     *
+     * @param key The key of the JSON document.
+     * @param path The JSONPath to specify the element to clear. Defaults to root "$".
+     * @return The number of values that were cleared or set to 0.
+     *         Returns 1 if path points to a scalar (scalar value itself is not changed).
+     *         Returns 0 if path does not exist.
+     * @throw PathNotFoundException if the key does not exist and path is not root.
+     * @throw InvalidPathException if the path syntax is invalid.
+     * @throw LuaScriptException if the Lua script execution fails.
+     * @throw ConnectionException if there's a problem with the Redis connection.
+     * @throw JsonParsingException if the result from script cannot be parsed.
+     */
+    long long json_clear(const std::string& key, const std::string& path = "$");
+
     // Path Operations (will be client-side get-modify-set, atomicity lost for SWSS)
     json get_path(const std::string& key, const std::string& path) const;
     void set_path(const std::string& key, const std::string& path,

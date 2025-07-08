@@ -1119,9 +1119,162 @@ const std::map<std::string, const std::string*> LuaScriptManager::SCRIPT_DEFINIT
     {"json_object_keys", &LuaScriptManager::JSON_OBJECT_KEYS_LUA},
     {"json_numincrby", &LuaScriptManager::JSON_NUMINCRBY_LUA},
     {"json_object_length", &LuaScriptManager::JSON_OBJECT_LENGTH_LUA},
-    {"json_array_insert", &LuaScriptManager::JSON_ARRAY_INSERT_LUA}
+    {"json_array_insert", &LuaScriptManager::JSON_ARRAY_INSERT_LUA},
+    {"json_clear", &LuaScriptManager::JSON_CLEAR_LUA}
     // Add any other scripts here if they are defined as static const std::string members
 };
+
+const std::string LuaScriptManager::JSON_CLEAR_LUA = LUA_COMMON_HELPERS + R"lua(
+-- Refined JSON_CLEAR_LUA
+local function do_clear_recursive(target_value)
+    local count = 0
+    if type(target_value) ~= 'table' then
+        -- This function should only be called on tables (arrays/objects)
+        -- Scalars are handled by the main logic before calling this.
+        return 0
+    end
+
+    -- Determine if it's an array or object
+    local is_array = true
+    local n = 0
+    if next(target_value) == nil then -- Empty table
+        is_array = true -- Treat as empty array for clearing (already clear)
+    else
+        for k, _ in pairs(target_value) do
+            n = n + 1
+            if type(k) ~= 'number' or k < 1 or k > n then
+                is_array = false; break
+            end
+        end
+        if is_array and #target_value ~= n then is_array = false; end
+    end
+
+    if is_array then
+        if #target_value > 0 then
+            for i = #target_value, 1, -1 do
+                table.remove(target_value, i)
+            end
+            -- An array itself being cleared counts as 1, regardless of its original content count.
+            count = 1
+        else
+            count = 0 -- Already empty array
+        end
+    else -- It's an object
+        for k, v in pairs(target_value) do
+            if type(v) == 'number' then
+                if target_value[k] ~= 0 then
+                    target_value[k] = 0
+                    count = count + 1
+                end
+            elseif type(v) == 'table' then
+                -- Recursively clear. The count from do_clear_recursive for a sub-table
+                -- will be 1 if it's a non-empty array that got cleared, or sum of cleared numbers/sub-arrays for sub-objects.
+                local sub_target_is_array = true
+                local sub_n = 0
+                if next(v) == nil then sub_target_is_array = true; else
+                    for sk,_ in pairs(v) do sub_n = sub_n + 1; if type(sk) ~= 'number' or sk < 1 or sk > sub_n then sub_target_is_array = false; break; end end
+                    if sub_target_is_array and #v ~= sub_n then sub_target_is_array = false; end
+                end
+
+                if sub_target_is_array then -- It's a nested array field
+                    if #v > 0 then -- If the nested array is not empty
+                        for i = #v, 1, -1 do table.remove(v, i); end
+                        count = count + 1 -- Count 1 for this array field being cleared
+                    end
+                else -- It's a nested object field
+                    count = count + do_clear_recursive(v) -- Add count from clearing the sub-object
+                end
+            else
+                -- Strings, booleans, nulls within an object are untouched and not counted.
+            end
+        end
+    end
+    return count
+end
+
+local key = KEYS[1]
+local path_str = ARGV[1]
+if path_str == nil then path_str = '$' end
+
+local current_json_str = redis.call('GET', key)
+
+if not current_json_str then
+    if path_str == '$' or path_str == '' then
+        return 0 -- Key not found, root path, 0 cleared (as per RedisJSON)
+    else
+        -- Key not found, non-root path, error (as per RedisJSON)
+        return redis.error_reply('ERR document not found')
+    end
+end
+
+local current_doc, err_decode = cjson.decode(current_json_str)
+if not current_doc then
+    return redis.error_reply('ERR_DECODE Failed to decode JSON for key ' .. key .. ': ' .. (err_decode or 'unknown error'))
+end
+
+local cleared_count = 0
+local modified = false -- Flag to track if SET is needed
+
+if path_str == '$' or path_str == '' then
+    -- Path is root
+    if type(current_doc) == 'table' then
+        cleared_count = do_clear_recursive(current_doc)
+        if cleared_count > 0 then modified = true; end
+    else
+        -- Root is a scalar. JSON.CLEAR on scalar path returns 1 but does not change it.
+        cleared_count = 1
+    end
+else
+    -- Path is not root
+    local path_segments = parse_path(path_str)
+    if path_segments == nil or (type(path_segments) == 'table' and path_segments.err) then
+        return redis.error_reply('ERR_PATH Invalid path string: ' .. path_str .. (path_segments.err or ''))
+    end
+
+    if #path_segments == 0 then -- Should have been caught by root check
+        if type(current_doc) == 'table' then
+            cleared_count = do_clear_recursive(current_doc)
+            if cleared_count > 0 then modified = true; end
+        else cleared_count = 1; end -- Root is scalar
+    else
+        -- Traverse to the parent of the target to check the target itself
+        local parent = current_doc
+        local target_exists = true
+        for i = 1, #path_segments - 1 do
+            local segment = path_segments[i]
+            if type(parent) ~= 'table' or parent[segment] == nil then
+                target_exists = false; break
+            end
+            parent = parent[segment]
+        end
+
+        local final_segment = path_segments[#path_segments]
+        if not target_exists or type(parent) ~= 'table' or parent[final_segment] == nil then
+            return 0 -- Path does not exist, 0 cleared (as per RedisJSON)
+        end
+
+        local target_value = parent[final_segment]
+        if type(target_value) == 'table' then
+            cleared_count = do_clear_recursive(target_value)
+            if cleared_count > 0 then modified = true; end
+        else
+            -- Path points to a scalar. JSON.CLEAR returns 1 but does not change it.
+            cleared_count = 1
+        end
+    end
+end
+
+-- Only SET if actual modifications occurred (i.e., a table was cleared/modified)
+if modified then
+    local new_doc_json_str, err_encode = cjson.encode(current_doc)
+    if not new_doc_json_str then
+        return redis.error_reply('ERR_ENCODE Failed to encode document after JSON.CLEAR: ' .. (err_encode or 'unknown error'))
+    end
+    redis.call('SET', key, new_doc_json_str)
+end
+
+return cleared_count
+)lua";
 
 const std::string* LuaScriptManager::get_script_body_by_name(const std::string& name) const {
     auto it = SCRIPT_DEFINITIONS.find(name);
