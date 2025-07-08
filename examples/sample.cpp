@@ -403,6 +403,107 @@ void run_sparse_merge_operations(redisjson::RedisJSONClient& client) {
     try { client.del_json(array_key); } catch (...) {}
 }
 
+void run_object_operations(redisjson::RedisJSONClient& client) {
+    print_header("Object Operations (OBJKEYS)");
+    std::string obj_key = "sample:object:user_prefs";
+    json user_preferences = {
+        {"username", "gamer123"},
+        {"theme", "dark"},
+        {"notifications", {
+            {"email", true},
+            {"sms", false},
+            {"push", true}
+        }},
+        {"language", "en-US"},
+        {"empty_obj", json::object()}
+    };
+
+    try {
+        client.set_json(obj_key, user_preferences);
+        std::cout << "Setup: Initial object document set for key '" << obj_key << "':\n"
+                  << client.get_json(obj_key).dump(2) << std::endl;
+
+        // 1. Get keys from the root object
+        std::vector<std::string> root_keys = client.object_keys(obj_key);
+        std::cout << "\nSUCCESS: Keys at root '$' of '" << obj_key << "':" << std::endl;
+        if (root_keys.empty()) {
+            std::cout << "  (No keys found or target is not an object)" << std::endl;
+        } else {
+            for (const auto& k : root_keys) {
+                std::cout << "  - " << k << std::endl;
+            }
+        }
+        // For verification, sort and check
+        std::vector<std::string> expected_root_keys = {"username", "theme", "notifications", "language", "empty_obj"};
+        std::sort(root_keys.begin(), root_keys.end());
+        std::sort(expected_root_keys.begin(), expected_root_keys.end());
+        if (root_keys != expected_root_keys) {
+            std::cerr << "VERIFICATION ERROR: Root keys do not match expected." << std::endl;
+        }
+
+
+        // 2. Get keys from a nested object
+        std::vector<std::string> notification_keys = client.object_keys(obj_key, "notifications");
+        std::cout << "\nSUCCESS: Keys at path 'notifications' of '" << obj_key << "':" << std::endl;
+        if (notification_keys.empty()) {
+            std::cout << "  (No keys found or target is not an object)" << std::endl;
+        } else {
+            for (const auto& k : notification_keys) {
+                std::cout << "  - " << k << std::endl;
+            }
+        }
+        std::vector<std::string> expected_notification_keys = {"email", "sms", "push"};
+        std::sort(notification_keys.begin(), notification_keys.end());
+        std::sort(expected_notification_keys.begin(), expected_notification_keys.end());
+        if (notification_keys != expected_notification_keys) {
+            std::cerr << "VERIFICATION ERROR: Notification keys do not match expected." << std::endl;
+        }
+
+        // 3. Get keys from an empty nested object
+        std::vector<std::string> empty_obj_keys = client.object_keys(obj_key, "empty_obj");
+        std::cout << "\nSUCCESS: Keys at path 'empty_obj' of '" << obj_key << "':" << std::endl;
+        if (empty_obj_keys.empty()) {
+            std::cout << "  (No keys found or target is not an object - expected for empty object)" << std::endl;
+        } else {
+            for (const auto& k : empty_obj_keys) {
+                std::cout << "  - " << k << std::endl;
+            }
+        }
+         if (!empty_obj_keys.empty()) { // Should be empty
+            std::cerr << "VERIFICATION ERROR: Keys for empty_obj should be empty." << std::endl;
+        }
+
+
+        // 4. Attempt to get keys from a path that is not an object (e.g., a string value)
+        std::vector<std::string> string_path_keys = client.object_keys(obj_key, "theme");
+        std::cout << "\nATTEMPT: Keys at path 'theme' (a string value) of '" << obj_key << "':" << std::endl;
+        if (string_path_keys.empty()) {
+            std::cout << "  (Correctly no keys found as 'theme' is not an object)" << std::endl;
+        } else {
+             std::cerr << "VERIFICATION ERROR: Keys for 'theme' (string) should be empty." << std::endl;
+            for (const auto& k : string_path_keys) {
+                std::cout << "  - " << k << std::endl;
+            }
+        }
+
+        // 5. Attempt to get keys from a non-existent path
+        std::vector<std::string> non_existent_path_keys = client.object_keys(obj_key, "settings.advanced");
+        std::cout << "\nATTEMPT: Keys at non-existent path 'settings.advanced' of '" << obj_key << "':" << std::endl;
+        if (non_existent_path_keys.empty()) {
+            std::cout << "  (Correctly no keys found as path does not exist)" << std::endl;
+        } else {
+            std::cerr << "VERIFICATION ERROR: Keys for non-existent path should be empty." << std::endl;
+        }
+
+
+    } catch (const redisjson::RedisJSONException& e) {
+        std::cerr << "ERROR in Object Operations: " << e.what() << std::endl;
+    }
+
+    // Cleanup
+    try { client.del_json(obj_key); } catch (...) {}
+}
+
 
 int main() {
     // --- Non-SWSS Mode / Legacy Mode Example ---
@@ -437,6 +538,7 @@ int main() {
         run_array_operations_extended(legacy_client); // Added extended array operations
         run_atomic_operations(legacy_client); // Original atomic operations using Lua
         run_sparse_merge_operations(legacy_client); // <--- Added new demo
+        run_object_operations(legacy_client); // <--- Added new demo for OBJKEYS
 
         print_header("Non-SWSS (Legacy) Mode Sample Program Finished");
 
