@@ -1324,7 +1324,7 @@ long long RedisJSONClient::json_clear(const std::string& key, const std::string&
     // Path can be empty (which defaults to '$' in Lua script) or explicitly '$'.
 
     try {
-        json result_json = lua_script_manager_->execute_script(
+        json result_json = _lua_script_manager->execute_script( // Fix 2: Typo
             "json_clear",
             {key},            // KEYS
             {path}            // ARGV
@@ -1336,15 +1336,19 @@ long long RedisJSONClient::json_clear(const std::string& key, const std::string&
             return 0;
         }
         else if (result_json.is_string()) {
+             // This case should ideally be caught by LuaScriptException if the script itself returns redis.error_reply()
+             // and redis_reply_to_json throws LuaScriptException for REDIS_REPLY_ERROR.
             throw RedisJSONException("JSON.CLEAR script returned an unexpected string: " + result_json.get<std::string>());
         }
         else {
-            throw TypeMismatchException("JSON.CLEAR", "Unexpected result type from Lua script: " + result_json.type_name());
+            // Fix 3: String concatenation
+            throw TypeMismatchException("JSON.CLEAR", "Unexpected result type from Lua script: " + std::string(result_json.type_name()));
         }
     } catch (const LuaScriptException& e) {
         std::string what_str = e.what();
         if (what_str.find("ERR document not found") != std::string::npos) {
-            throw PathNotFoundException(key, path, "Document not found for JSON.CLEAR operation on non-root path.", e.script_name());
+            // Fix 4: Pass script name directly
+            throw PathNotFoundException(key, path, "Document not found for JSON.CLEAR operation on non-root path.", "json_clear");
         }
         throw;
     } catch (const RedisJSONException& e) {
@@ -1352,6 +1356,8 @@ long long RedisJSONClient::json_clear(const std::string& key, const std::string&
     } catch (const std::exception& e) {
         throw JsonParsingException("Failed to parse result for JSON.CLEAR: " + std::string(e.what()));
     }
+    // Fix 5: Control reaches end of non-void function
+    throw RedisJSONException("Reached end of non-void function json_clear unexpectedly");
 }
 
 } // namespace redisjson
