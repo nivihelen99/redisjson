@@ -1057,6 +1057,128 @@ void run_arrindex_operations(redisjson::RedisJSONClient& client) {
     try { client.del_json(key); } catch(...) {}
 }
 
+void run_array_trim_operations(redisjson::RedisJSONClient& client) {
+    print_header("Array Trim Operations (JSON.ARRTRIM)");
+    std::string key = "sample:arrtrim:data";
+
+    auto reset_and_log = [&](const json& initial_doc) {
+        try { client.del_json(key); } catch(...) {}
+        client.set_json(key, initial_doc);
+        std::cout << "Initial array: " << client.get_json(key).dump() << std::endl;
+    };
+
+    auto test_trim = [&](const std::string& path, long long start, long long stop, const json& expected_arr, long long expected_len) {
+        try {
+            long long new_len = client.json_array_trim(key, path, start, stop);
+            std::cout << "SUCCESS: Trimmed path '" << path << "' with (" << start << ", " << stop
+                      << "). New length: " << new_len << std::endl;
+            json current_arr_at_path;
+            if (path == "$") {
+                current_arr_at_path = client.get_json(key);
+            } else {
+                 // For simplicity, assume path is simple like "my.array" and get the whole doc then extract
+                json full_doc = client.get_json(key);
+                // This is a simplified way to get nested for example, real scenarios might need robust path parsing
+                // For the example, we'll assume simple paths or root path.
+                // If path is "arr.sub", we need to get full_doc["arr"]["sub"]
+                // This part is tricky for a generic example print without full client-side path evaluation.
+                // Let's just print the whole doc for nested paths.
+                if (full_doc.contains(path)) current_arr_at_path = full_doc[path]; // Super simplified
+                else current_arr_at_path = client.get_path(key, path); // Try get_path
+            }
+
+            std::cout << "Array after trim: " << current_arr_at_path.dump() << std::endl;
+            if (new_len != expected_len || current_arr_at_path != expected_arr) {
+                std::cerr << "  VERIFICATION FAILED! Expected len: " << expected_len << ", got: " << new_len
+                          << ". Expected array: " << expected_arr.dump() << ", got: " << current_arr_at_path.dump() << std::endl;
+            }
+        } catch (const redisjson::RedisJSONException& e) {
+            std::cerr << "ERROR trimming path '" << path << "' with (" << start << ", " << stop << "): " << e.what() << std::endl;
+        }
+        std::cout << std::endl;
+    };
+
+    // Test cases
+    json initial_arr_doc = json::array({0, 1, 2, 3, 4, 5});
+
+    // 1. Positive indices
+    reset_and_log(initial_arr_doc);
+    test_trim("$", 1, 3, json::array({1, 2, 3}), 3);
+
+    // 2. Negative start index
+    reset_and_log(initial_arr_doc);
+    test_trim("$", -3, 4, json::array({3, 4}), 2); // arr[-3:4] -> arr[3:4] inclusive
+
+    // 3. Negative stop index
+    reset_and_log(initial_arr_doc);
+    test_trim("$", 1, -2, json::array({1, 2, 3, 4}), 4); // arr[1:-2] -> arr[1:4] inclusive
+
+    // 4. Both negative
+    reset_and_log(initial_arr_doc);
+    test_trim("$", -4, -2, json::array({2, 3, 4}), 3); // arr[-4:-2] -> arr[2:4] inclusive
+
+    // 5. Start > Stop
+    reset_and_log(initial_arr_doc);
+    test_trim("$", 3, 1, json::array(), 0);
+
+    // 6. Out of bounds (stop too large)
+    reset_and_log(initial_arr_doc);
+    test_trim("$", 2, 10, json::array({2, 3, 4, 5}), 4); // arr[2:10] -> arr[2:5] inclusive
+
+    // 7. Out of bounds (start too large)
+    reset_and_log(initial_arr_doc);
+    test_trim("$", 10, 12, json::array(), 0);
+
+    // 8. Trim empty array
+    reset_and_log(json::array());
+    test_trim("$", 0, 1, json::array(), 0);
+
+    // 9. Nested array
+    json nested_doc = {{"data", {{"items", {10,20,30,40,50}}}}};
+    reset_and_log(nested_doc);
+    // To verify nested, we'd ideally check client.get_path(key, "data.items")
+    // For simplicity in test_trim, it might print the whole doc or use a very basic path access.
+    // The expected array passed to test_trim should be the state of "data.items"
+    // The actual verification of the nested array's state after trim is more complex to show directly in test_trim's current form.
+    // Let's do a direct call and verification for nested to be clearer:
+    std::cout << "--- Nested Array Trim ---" << std::endl;
+    client.set_json(key, {{"outer", {{"inner_array", {1,2,3,4,5}}}}});
+    std::cout << "Initial nested: " << client.get_json(key).dump() << std::endl;
+    try {
+        long long len = client.json_array_trim(key, "outer.inner_array", 1, 3);
+        std::cout << "Trimmed 'outer.inner_array' (1,3), new len: " << len << std::endl;
+        json result_doc = client.get_json(key);
+        std::cout << "Full doc after nested trim: " << result_doc.dump() << std::endl;
+        if (len != 3) {
+            std::cerr << "  VERIFICATION FAILED for nested trim length! Expected 3, got " << len << std::endl;
+        }
+        if (result_doc["outer"]["inner_array"] != json::array({2,3,4})) {
+             std::cerr << "  VERIFICATION FAILED for nested trim result! Expected [2,3,4], got " << result_doc["outer"]["inner_array"].dump() << std::endl;
+        }
+    } catch(const redisjson::RedisJSONException& e) {
+        std::cerr << "Error in nested trim: " << e.what() << std::endl;
+    }
+
+    // Error cases
+    std::cout << "\n--- Error Cases ---" << std::endl;
+    // Key not found (test_trim will fail to set/get, or json_array_trim call will throw)
+    try { client.del_json(key); } catch(...) {} // Ensure key is gone
+    std::cout << "Attempting trim on non-existent key:" << std::endl;
+    test_trim("$", 0,0, json::array(), 0); // This will likely show error from client.set_json in reset_and_log or client.json_array_trim
+
+    // Path not an array
+    reset_and_log({{"not_an_array", "string value"}});
+    std::cout << "Attempting trim on non-array path:" << std::endl;
+    test_trim("not_an_array", 0, 0, json::array() /* dummy */, 0 /* dummy */); // Expect error
+
+    // Path not found
+    reset_and_log({{"some_obj", {{"actual_array", {1,2}}}}});
+    std::cout << "Attempting trim on non-existent path:" << std::endl;
+    test_trim("some_obj.wrong_path", 0,0, json::array(), 0); // Expect error
+
+    try { client.del_json(key); } catch(...) {}
+}
+
 
 int main() {
     // --- Non-SWSS Mode / Legacy Mode Example ---
@@ -1096,6 +1218,7 @@ int main() {
         run_numeric_operations(legacy_client);
         run_jsonclear_operations(legacy_client); // Added this line
         run_arrindex_operations(legacy_client); // Added for JSON.ARRINDEX
+        run_array_trim_operations(legacy_client); // Added for JSON.ARRTRIM
 
         print_header("Non-SWSS (Legacy) Mode Sample Program Finished");
 

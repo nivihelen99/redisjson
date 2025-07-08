@@ -29,6 +29,70 @@ static std::string reconstruct_path_string(const std::vector<PathParser::PathEle
     return p_str;
 }
 
+long long JSONModifier::array_trim(json& document, const std::vector<PathParser::PathElement>& path_elements,
+                                   long long start, long long stop) {
+    json* target_array_ptr = navigate_to_element(document, path_elements, false /* create_missing_paths */);
+
+    if (!target_array_ptr) {
+        // This case should ideally be caught by navigate_to_element throwing PathNotFoundException
+        // if the path doesn't lead to an actual element.
+        // If path_elements is empty, navigate_to_element would return &document.
+        // If path_elements is not empty and path doesn't exist, it throws.
+        // So, getting a nullptr here might indicate an issue if path_elements was non-empty.
+        // However, if document itself is null and path_elements is empty, target_array_ptr would be &document (which is null).
+        // Let's assume if target_array_ptr is null, the path was effectively not found or document is null.
+        throw PathNotFoundException("Path for array_trim not found or document is null.", reconstruct_path_string(path_elements, path_elements.empty() ? static_cast<size_t>(-1) : path_elements.size() - 1));
+    }
+
+    if (!target_array_ptr->is_array()) {
+        throw TypeMismatchException(reconstruct_path_string(path_elements, path_elements.empty() ? static_cast<size_t>(-1) : path_elements.size() - 1), "array", target_array_ptr->type_name());
+    }
+
+    json& target_array = *target_array_ptr;
+    long long array_len = static_cast<long long>(target_array.size());
+    json new_array_content = json::array(); // Use json::array() to initialize as an empty JSON array
+
+    // Normalize start index (0-based)
+    long long norm_start = start;
+    if (norm_start < 0) {
+        norm_start = array_len + norm_start;
+    }
+    // Clamp start index to [0, array_len]
+    if (norm_start < 0) norm_start = 0;
+    if (norm_start > array_len) norm_start = array_len;
+
+    // Normalize stop index (0-based, inclusive)
+    long long norm_stop = stop;
+    if (norm_stop < 0) {
+        norm_stop = array_len + norm_stop;
+    }
+    // Clamp stop index to [-1, array_len - 1]
+    // (stop can be -1 if original was very negative, making start > stop)
+    if (norm_stop < -1) norm_stop = -1; // Ensures start > stop if it was too negative
+    if (norm_stop >= array_len) norm_stop = array_len - 1;
+
+
+    if (norm_start <= norm_stop && array_len > 0) {
+        for (long long i = norm_start; i <= norm_stop; ++i) {
+            // We need to ensure i is within the bounds of the original array [0, array_len - 1]
+            // The loop condition norm_start <= norm_stop is primary.
+            // norm_start is already clamped to [0, array_len].
+            // norm_stop is already clamped to [-1, array_len - 1].
+            // So, if norm_start <= norm_stop, then i will be in a valid range for access if array_len > 0.
+            // No, this is not entirely correct. Example: array_len = 5, start=5, stop=4 (after normalization)
+            // norm_start (5) > norm_stop (4) -> loop doesn't run. Correct.
+            // Example: array_len = 0. norm_start=0, norm_stop=-1. loop doesn't run. Correct.
+            // Example: array_len = 5, start=0, stop=4. norm_start=0, norm_stop=4. Loop 0..4. Correct.
+            // Example: array_len = 5, start=0, stop=10. norm_start=0, norm_stop=4. Loop 0..4. Correct.
+            // Example: array_len = 5, start=3, stop=1. norm_start=3, norm_stop=1. Loop doesn't run. Correct.
+             new_array_content.push_back(target_array.at(static_cast<size_t>(i)));
+        }
+    }
+
+    target_array = new_array_content; // Replace the existing array with the trimmed one
+    return static_cast<long long>(target_array.size());
+}
+
 
 const json* JSONModifier::navigate_to_element_const(const json& doc,
                                                  const std::vector<PathParser::PathElement>& path_elements) const {

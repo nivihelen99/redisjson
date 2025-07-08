@@ -28,6 +28,68 @@ RedisJSONClient::RedisJSONClient(const LegacyClientConfig& client_config)
     }
 }
 
+long long RedisJSONClient::json_array_trim(const std::string& key, const std::string& path, long long start_index, long long stop_index) {
+    if (_is_swss_mode) {
+        // Non-atomic get-modify-set for SWSS mode
+        SetOptions opts; // Default set options
+        json doc;
+        try {
+            doc = get_json(key); // Throws PathNotFoundException if key does not exist
+        } catch (const PathNotFoundException&) {
+            // If key doesn't exist, ARRTRIM on it is an error or no-op.
+            // Replicate Redis behavior: if key does not exist, it's an error.
+            // The Lua script for non-SWSS mode would return ERR_NOKEY.
+            // Here, get_json already threw PathNotFoundException, so we can just rethrow or let it propagate.
+            throw; // Or throw a more specific error if ARRTRIM has unique error codes for this.
+                   // For now, PathNotFoundException for the key is appropriate.
+        }
+
+        try {
+            // JSONModifier will need an array_trim method.
+            // It should modify 'doc' in place and return the new length.
+            long long new_length = _json_modifier->array_trim(doc, _path_parser->parse(path), start_index, stop_index);
+            _set_document_after_modification(key, doc, opts);
+            return new_length;
+        } catch (const PathNotFoundException& e) { // Path to array not found within the document
+            throw;
+        } catch (const TypeMismatchException& e) { // Path does not point to an array
+            throw;
+        } catch (const IndexOutOfBoundsException& e) { // Should be handled by array_trim logic, but if modifier throws
+            throw;
+        }
+        catch (const json::exception& e) { // Other errors from nlohmann::json during modification
+            throw RedisCommandException("ARRTRIM (SWSS-Client)", "Key: " + key + ", Path: " + path + ", JSON mod error: " + e.what());
+        }
+    } else { // Legacy mode (uses Lua script)
+        throwIfNotLegacyWithLua("json_array_trim");
+        std::vector<std::string> keys_vec = {key};
+        std::vector<std::string> args_vec = {path, std::to_string(start_index), std::to_string(stop_index)};
+        try {
+            json result = _lua_script_manager->execute_script("json_array_trim", keys_vec, args_vec);
+            if (result.is_number_integer()) {
+                return result.get<long long>();
+            }
+            // If Lua script returns an error string, LuaScriptException would have been thrown by redis_reply_to_json
+            // or execute_script itself.
+            // If it's not an integer, it's an unexpected success response.
+            throw RedisCommandException("LUA_json_array_trim", "Key: " + key + ", Path: " + path + ", Unexpected result type from script: " + result.dump());
+        } catch (const LuaScriptException& e) {
+            std::string error_msg = e.what();
+            if (error_msg.find("ERR_NOKEY") != std::string::npos) {
+                throw PathNotFoundException(key, path); // Key not found.
+            } else if (error_msg.find("ERR_NOPATH") != std::string::npos) {
+                throw PathNotFoundException(key, path); // Path not found in document.
+            } else if (error_msg.find("ERR_NOT_ARRAY") != std::string::npos) {
+                throw TypeMismatchException(path, "array", "value at path is not an array.");
+            } else if (error_msg.find("ERR_INDEX") != std::string::npos) {
+                // This could be an ArgumentInvalidException or similar if we want to be more specific
+                throw RedisCommandException("LUA_json_array_trim", "Key: " + key + ", Path: " + path + ", Invalid index argument: " + error_msg);
+            }
+            throw RedisCommandException("LUA_json_array_trim", "Key: " + key + ", Path: " + path + ", Error: " + error_msg);
+        }
+    }
+}
+
 // Constructor for SONiC SWSS environment
 RedisJSONClient::RedisJSONClient(const SwssClientConfig& swss_config)
     : _is_swss_mode(true), _swss_config(swss_config) {

@@ -1307,6 +1307,166 @@ end
 return cleared_count
 )lua";
 
+const std::string LuaScriptManager::JSON_ARRAY_TRIM_LUA = LUA_COMMON_HELPERS + R"lua(
+-- Script for JSON.ARRTRIM
+-- KEYS[1] - The key where the JSON document is stored
+-- ARGV[1] - The path to the array within the JSON document.
+-- ARGV[2] - The start index (0-based, inclusive).
+-- ARGV[3] - The stop index (0-based, inclusive).
+
+local key = KEYS[1]
+local path_str = ARGV[1]
+local start_index_str = ARGV[2]
+local stop_index_str = ARGV[3]
+
+-- Get the JSON string from Redis
+local current_json_str = redis.call('GET', key)
+if not current_json_str then
+    return redis.error_reply('ERR_NOKEY Key ' .. key .. ' does not exist')
+end
+
+-- Decode the JSON string
+local current_doc, err_decode = cjson.decode(current_json_str)
+if not current_doc then
+    return redis.error_reply('ERR_DECODE Failed to decode JSON for key ' .. key .. ': ' .. (err_decode or 'unknown error'))
+end
+
+-- Get the target array
+local target_array_ref = current_doc
+local is_root_path = (path_str == '$' or path_str == '')
+
+if not is_root_path then
+    local path_segments = parse_path(path_str)
+    if path_segments == nil or (type(path_segments) == 'table' and path_segments.err) then
+         return redis.error_reply('ERR_PATH Invalid path string: ' .. path_str .. (path_segments.err or ''))
+    end
+    if #path_segments == 0 then -- Should not happen if not root, but as a safeguard
+        return redis.error_reply('ERR_PATH Path resolved to root unexpectedly for non-root path string: ' .. path_str)
+    end
+    target_array_ref = get_value_at_path(current_doc, path_segments)
+end
+
+if target_array_ref == nil then
+    return redis.error_reply('ERR_NOPATH Path ' .. path_str .. ' does not exist or is null')
+end
+
+-- Validate if it's actually an array
+local is_actual_array = true
+if type(target_array_ref) ~= 'table' then
+    is_actual_array = false
+else
+    local count = 0
+    local max_idx = 0
+    if next(target_array_ref) ~= nil then -- Not an empty table {}
+        for k, v in pairs(target_array_ref) do
+            count = count + 1
+            if type(k) ~= 'number' then is_actual_array = false; break; end
+            if k > max_idx then max_idx = k end
+        end
+        if is_actual_array and count > 0 and (max_idx ~= count or #target_array_ref ~= count) then
+             -- This check helps distinguish { "1": "a", "3": "b" } (object-like) from { "a", "b" } (array-like)
+             -- For cjson decoded arrays, #target_array_ref should be reliable.
+            is_actual_array = false
+        end
+    end
+    -- Empty table {} is considered an empty array by default for array operations.
+end
+
+if not is_actual_array then
+    return redis.error_reply('ERR_NOT_ARRAY Path ' .. path_str .. ' does not point to an array (type: ' .. type(target_array_ref) .. ')')
+end
+
+local start_idx = tonumber(start_index_str)
+local stop_idx = tonumber(stop_index_str)
+
+if start_idx == nil or stop_idx == nil then
+    return redis.error_reply('ERR_INDEX Invalid start or stop index: not a number.')
+end
+
+local array_len = #target_array_ref
+local new_array = {}
+
+-- Convert client 0-based indices to Lua 1-based indices
+-- Handle negative indices: if index is negative, it counts from the end.
+-- Python slice logic: arr[start:end] (end is exclusive). LTRIM is inclusive.
+-- For ARRTRIM, start and stop are inclusive 0-based indices.
+
+-- Normalize start index (0-based)
+if start_idx < 0 then
+    start_idx = array_len + start_idx
+end
+if start_idx < 0 then -- Still negative after adding length (e.g., -len - 1)
+    start_idx = 0
+end
+if start_idx >= array_len then -- Start is beyond the end
+    start_idx = array_len -- effectively means no elements if stop is also >= array_len or < start_idx
+end
+
+
+-- Normalize stop index (0-based)
+if stop_idx < 0 then
+    stop_idx = array_len + stop_idx
+end
+if stop_idx < 0 then -- Stop is before the beginning
+    stop_idx = -1 -- effectively means no elements as loop condition start_lua <= stop_lua won't meet
+end
+if stop_idx >= array_len then
+    stop_idx = array_len - 1
+end
+
+-- If start is greater than stop after normalization, result is an empty array
+if start_idx > stop_idx or array_len == 0 then
+    -- Target array becomes empty
+    if is_root_path then
+        current_doc = empty_array() -- Special empty array with metatable for cjson
+    else
+        -- Need to set the new empty array back at the path
+        local path_segments = parse_path(path_str) -- Re-parse, error checked above
+        local success, err_set = set_value_at_path(current_doc, path_segments, empty_array(), false)
+        if not success then return redis.error_reply('ERR_SET_PATH Failed to set empty array: ' .. err_set) end
+    end
+else
+    -- Convert 0-based normalized start/stop to 1-based Lua indices for iteration
+    local start_lua = start_idx + 1
+    local stop_lua = stop_idx + 1
+
+    for i = start_lua, stop_lua do
+        table.insert(new_array, target_array_ref[i])
+    end
+    setmetatable(new_array, { __array = true }) -- Ensure it's encoded as JSON array
+
+    if is_root_path then
+        current_doc = new_array
+    else
+        local path_segments = parse_path(path_str) -- Re-parse, error checked above
+        local success, err_set = set_value_at_path(current_doc, path_segments, new_array, false)
+        if not success then return redis.error_reply('ERR_SET_PATH Failed to set trimmed array: ' .. err_set) end
+    end
+end
+
+local new_doc_json_str, err_encode = cjson.encode(current_doc)
+if not new_doc_json_str then
+    return redis.error_reply('ERR_ENCODE Failed to encode document after array trim: ' .. (err_encode or 'unknown error'))
+end
+
+redis.call('SET', key, new_doc_json_str)
+
+-- Get the length of the array *at the path* after modification.
+-- If the path was root, current_doc is the array.
+-- If path was not root, we need to re-fetch the (potentially new) array at path.
+local final_array_at_path = current_doc
+if not is_root_path then
+    local path_segments_final = parse_path(path_str)
+    final_array_at_path = get_value_at_path(current_doc, path_segments_final)
+    if final_array_at_path == nil or type(final_array_at_path) ~= 'table' then
+        -- This should not happen if set_value_at_path was successful.
+        return redis.error_reply('ERR_INTERNAL Could not retrieve array after trim to determine length')
+    end
+end
+
+return #final_array_at_path
+)lua";
+
 LuaScriptManager::LuaScriptManager(RedisConnectionManager* conn_manager)
     : connection_manager_(conn_manager) {
     if (!conn_manager) {
@@ -1379,7 +1539,8 @@ const std::map<std::string, const std::string*> LuaScriptManager::SCRIPT_DEFINIT
     {"json_object_length", &LuaScriptManager::JSON_OBJECT_LENGTH_LUA},
     {"json_array_insert", &LuaScriptManager::JSON_ARRAY_INSERT_LUA},
     {"json_clear", &LuaScriptManager::JSON_CLEAR_LUA},
-    {"json_arrindex", &LuaScriptManager::JSON_ARRINDEX_LUA}
+    {"json_arrindex", &LuaScriptManager::JSON_ARRINDEX_LUA},
+    {"json_array_trim", &LuaScriptManager::JSON_ARRAY_TRIM_LUA}
 };
 
 // Moved get_script_body_by_name and redis_reply_to_json here

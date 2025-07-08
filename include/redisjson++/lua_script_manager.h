@@ -117,6 +117,7 @@ private:
     static const std::string JSON_ARRAY_INSERT_LUA;
     static const std::string JSON_CLEAR_LUA;
     static const std::string JSON_ARRINDEX_LUA;
+    static const std::string JSON_ARRAY_TRIM_LUA;
     // ... other built-in scripts
 };
 
