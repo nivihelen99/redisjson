@@ -198,13 +198,122 @@ end
 
 const std::string LUA_HELPER_EMPTY_ARRAY_FUNC = R"lua(
 local function empty_array()
+    -- This function is still used by JSON_ARRAY_TRIM_LUA when it creates a *new* array
+    -- that might be empty. The sentinel replacement logic will handle it if it remains empty.
     local arr = {}
     setmetatable(arr, { __array = true })
     return arr
 end
 )lua";
 
-const std::string LUA_COMMON_HELPERS = LUA_HELPER_PARSE_PATH_FUNC + LUA_HELPER_GET_VALUE_AT_PATH_FUNC + LUA_HELPER_SET_VALUE_AT_PATH_FUNC + LUA_HELPER_DEL_VALUE_AT_PATH_FUNC + LUA_HELPER_EMPTY_ARRAY_FUNC;
+const std::string LUA_EMPTY_ARRAY_SENTINEL_DEF = R"lua(
+local EMPTY_ARRAY_SENTINEL = "__EMPTY_ARRAY_SENTINEL_PLACEHOLDER__"
+)lua";
+
+const std::string LUA_REPLACE_EMPTY_ARRAYS_RECURSIVE_FUNC = LUA_EMPTY_ARRAY_SENTINEL_DEF + R"lua(
+local function replace_empty_arrays_with_sentinel_recursive(doc_table)
+    if type(doc_table) ~= 'table' then
+        return
+    end
+
+    -- For the current table itself, if it's empty, check its metatable.
+    -- This case is mostly for when this function is called on a potentially empty root document.
+    if next(doc_table) == nil then
+        local mt_root = getmetatable(doc_table)
+        if not (mt_root and mt_root.__array) then
+            -- If it's an empty table but NOT explicitly an array, don't process for sentinel.
+            -- It will be encoded as {} by cjson, which is correct for an empty object.
+            -- No further recursion needed as it's empty.
+            return
+        end
+        -- If it IS an empty array (metatable __array=true), it will be handled by the caller
+        -- which might replace the reference to doc_table with EMPTY_ARRAY_SENTINEL.
+        -- This function's role is more about *contained* tables.
+        -- However, the logic below will iterate its keys/indices (none, if empty).
+    end
+
+    local keys_to_process = {}
+    local is_array_like = true -- Assume array unless proven otherwise for key gathering
+    if next(doc_table) == nil then
+        is_array_like = false -- No keys/indices to process
+    else
+        for k_check in pairs(doc_table) do
+            if type(k_check) ~= 'number' then
+                is_array_like = false
+                break
+            end
+        end
+    end
+
+    if is_array_like then
+        -- Process numerically indexed items (potential array elements)
+        -- Using ipairs for dense arrays, but need to handle sparse arrays converted to objects.
+        -- The original loop `for i = 1, #doc_table do` is better for actual Lua arrays.
+        -- Let's refine to iterate based on actual keys present.
+        local max_idx = 0
+        for k in pairs(doc_table) do
+           if type(k) == 'number' and k > max_idx then max_idx = k end
+        end
+        for i = 1, max_idx do -- Iterate up to max numeric index found
+            local value = doc_table[i]
+            if value ~= nil and type(value) == 'table' then
+                if next(value) == nil then -- Value is an empty table
+                    local mt_val = getmetatable(value)
+                    if mt_val and mt_val.__array then
+                        doc_table[i] = EMPTY_ARRAY_SENTINEL
+                    end
+                    -- If empty table but not __array, it's an empty object, leave as is.
+                else
+                    replace_empty_arrays_with_sentinel_recursive(value)
+                    -- After recursion, if value itself became an empty array (e.g. cleared deeper)
+                    -- this check is a bit redundant if the recursive call handles its own root.
+                    -- However, if `value` was modified by recursion to become an empty array sentinel,
+                    -- then `doc_table[i]` would already be the sentinel.
+                    -- If `value` was modified to become an empty table that *is* an array, re-check.
+                    if type(doc_table[i]) == 'table' and next(doc_table[i]) == nil then
+                        local mt_after_recur = getmetatable(doc_table[i])
+                        if mt_after_recur and mt_after_recur.__array then
+                            doc_table[i] = EMPTY_ARRAY_SENTINEL
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- Process string keys (object properties) or non-sequential numeric keys
+    -- This ensures all table types are iterated, not just dense arrays.
+    for key, value in pairs(doc_table) do
+        if type(key) == 'string' or (type(key) == 'number' and not is_array_like) then -- Process if string key or if not a dense array
+            if type(value) == 'table' then
+                if next(value) == nil then -- Value is an empty table
+                    local mt_val = getmetatable(value)
+                    if mt_val and mt_val.__array then
+                        doc_table[key] = EMPTY_ARRAY_SENTINEL
+                    end
+                    -- If empty table but not __array, it's an empty object, leave as is.
+                else
+                    replace_empty_arrays_with_sentinel_recursive(value)
+                    if type(doc_table[key]) == 'table' and next(doc_table[key]) == nil then
+                         local mt_after_recur = getmetatable(doc_table[key])
+                         if mt_after_recur and mt_after_recur.__array then
+                             doc_table[key] = EMPTY_ARRAY_SENTINEL
+                         end
+                    end
+                end
+            end
+        end
+    end
+end
+)lua";
+
+
+const std::string LUA_COMMON_HELPERS = LUA_HELPER_PARSE_PATH_FUNC +
+                                   LUA_HELPER_GET_VALUE_AT_PATH_FUNC +
+                                   LUA_HELPER_SET_VALUE_AT_PATH_FUNC +
+                                   LUA_HELPER_DEL_VALUE_AT_PATH_FUNC +
+                                   LUA_HELPER_EMPTY_ARRAY_FUNC +
+                                   LUA_REPLACE_EMPTY_ARRAYS_RECURSIVE_FUNC;
 
 const std::string LuaScriptManager::JSON_PATH_GET_LUA = LUA_COMMON_HELPERS + R"lua(
     local key = KEYS[1]
@@ -1194,8 +1303,11 @@ local function do_clear_recursive(target_value, is_target_array_hint)
                 if sub_modified then item_modified_this_iteration = true; end
 
                 -- If v is an array and is empty (either became empty or started empty), ensure metatable.
-                if sub_is_array_hint and #v == 0 then
-                    setmetatable(v, { __array = true })
+                if sub_is_array_hint and next(v) == nil then -- Check if truly empty
+                    local mt_v = getmetatable(v)
+                    if not mt_v or mt_v.__array ~= true then
+                         setmetatable(v, { __array = true })
+                    end
                 end
             end
             if item_modified_this_iteration then
@@ -1206,8 +1318,16 @@ local function do_clear_recursive(target_value, is_target_array_hint)
     -- For arrays handled at the current level of recursion:
     -- If it's an array and it's empty, ensure it has the __array metatable.
     -- This covers arrays that were emptied OR were already empty.
-    if is_array and #target_value == 0 then
-        setmetatable(target_value, { __array = true })
+    -- Only set __array = true if it was determined to be an array and is now empty.
+    -- An empty object should not get this metatable.
+    if is_array and next(target_value) == nil then -- Check if truly empty
+        -- Check if it already has a metatable; if so, preserve it if it's not for __array
+        -- Or, more simply, just ensure __array is true if it's meant to be an array.
+        -- The crucial part is that `is_array` must be a reliable determination.
+        local mt = getmetatable(target_value)
+        if not mt or mt.__array ~= true then -- Set or overwrite only if not already correctly set
+            setmetatable(target_value, { __array = true })
+        end
     end
     return count, actually_modified_structure
 end
@@ -1241,8 +1361,11 @@ if path_str == '$' or path_str == '' then
         end
         cleared_count, doc_modified_overall = do_clear_recursive(current_doc, root_is_array)
         -- If the root was an array and is now empty (or started empty and was processed), ensure metatable.
-        if root_is_array and (type(current_doc)=='table' and #current_doc == 0) then
-             setmetatable(current_doc, { __array = true })
+        if root_is_array and (type(current_doc)=='table' and next(current_doc) == nil) then -- Check if truly empty
+             local mt_root = getmetatable(current_doc)
+             if not mt_root or mt_root.__array ~= true then
+                setmetatable(current_doc, { __array = true })
+             end
         end
     else
          cleared_count = 0; doc_modified_overall = false;
@@ -1256,9 +1379,26 @@ else -- Path is not root
         -- Path resolved to root (e.g. if parse_path can return empty for root-like variants)
         -- Fallback to root processing logic.
         if type(current_doc) == 'table' then
-            local root_is_array_alt = nil; local n_root_keys_alt=0; if next(current_doc)==nil then root_is_array_alt=true; else for kr,_ in pairs(current_doc) do n_root_keys_alt=n_root_keys_alt+1; if type(kr)~='number' or kr<1 or kr>n_root_keys_alt then root_is_array_alt=false; break; end end; if root_is_array_alt==nil and #current_doc~=n_root_keys_alt then root_is_array_alt=false; end; if root_is_array_alt==nil then root_is_array_alt=true; end end
+            local root_is_array_alt = nil; local n_root_keys_alt=0;
+            if next(current_doc)==nil then
+                -- If root is an empty table, its type (array/object) depends on pre-existing metatable or context.
+                -- For JSON.CLEAR, if path is '$' and doc is `{}`, it should remain `{}`.
+                -- The `do_clear_recursive` will respect its `is_array_hint`.
+                -- Here, we need to correctly determine this initial hint for the root.
+                local mt = getmetatable(current_doc)
+                if mt and mt.__array then root_is_array_alt = true else root_is_array_alt = false end
+            else
+                for kr,_ in pairs(current_doc) do n_root_keys_alt=n_root_keys_alt+1; if type(kr)~='number' or kr<1 or kr>n_root_keys_alt then root_is_array_alt=false; break; end end;
+                if root_is_array_alt==nil and #current_doc~=n_root_keys_alt then root_is_array_alt=false; end;
+                if root_is_array_alt==nil then root_is_array_alt=true; end
+            end
             cleared_count, doc_modified_overall = do_clear_recursive(current_doc, root_is_array_alt)
-            if root_is_array_alt and #current_doc == 0 then setmetatable(current_doc, { __array = true }); end
+            if root_is_array_alt and next(current_doc) == nil then -- Check if truly empty
+                 local mt_root_alt = getmetatable(current_doc)
+                 if not mt_root_alt or mt_root_alt.__array ~= true then
+                    setmetatable(current_doc, { __array = true });
+                 end
+            end
         else cleared_count = 0; doc_modified_overall = false; end
     else
         -- Path is not root, and path_segments is not empty
@@ -1277,11 +1417,20 @@ else -- Path is not root
 
         local target_value = parent[final_segment]
         if type(target_value) == 'table' then
-            local target_is_array = nil; local n_target_keys=0; if next(target_value)==nil then target_is_array=true; else for kt,_ in pairs(target_value) do n_target_keys=n_target_keys+1; if type(kt)~='number' or kt<1 or kt>n_target_keys then target_is_array=false; break; end end; if target_is_array==nil and #target_value~=n_target_keys then target_is_array=false; end; if target_is_array==nil then target_is_array=true; end end
-            cleared_count, doc_modified_overall = do_clear_recursive(target_value, target_is_array)
+            local target_is_array_hint = nil; local n_target_keys=0;
+            if next(target_value)==nil then
+                local mt_target = getmetatable(target_value)
+                if mt_target and mt_target.__array then target_is_array_hint = true else target_is_array_hint = false end
+            else
+                 for kt,_ in pairs(target_value) do n_target_keys=n_target_keys+1; if type(kt)~='number' or kt<1 or kt>n_target_keys then target_is_array_hint=false; break; end end; if target_is_array_hint==nil and #target_value~=n_target_keys then target_is_array_hint=false; end; if target_is_array_hint==nil then target_is_array_hint=true; end
+            end
+            cleared_count, doc_modified_overall = do_clear_recursive(target_value, target_is_array_hint)
             -- If the cleared target was an array and is now empty (or started empty), ensure metatable.
-            if target_is_array and #target_value == 0 then
-                setmetatable(target_value, {__array = true}) 
+            if target_is_array_hint and next(target_value) == nil then -- Check if truly empty
+                local mt_target_after = getmetatable(target_value)
+                if not mt_target_after or mt_target_after.__array ~= true then
+                    setmetatable(target_value, {__array = true})
+                end
             end
         elseif type(target_value) == 'number' then
             parent[final_segment] = 0
@@ -1297,10 +1446,17 @@ else -- Path is not root
 end
 
 if doc_modified_overall then
+    -- Replace empty arrays with sentinel BEFORE encoding
+    replace_empty_arrays_with_sentinel_recursive(current_doc)
+
     local new_doc_json_str, err_encode = cjson.encode(current_doc)
     if not new_doc_json_str then
         return redis.error_reply('ERR_ENCODE Failed to encode document after CLEAR: ' .. (err_encode or 'unknown error'))
     end
+
+    -- Replace sentinel string with actual empty array JSON '[]' AFTER encoding
+    new_doc_json_str = string.gsub(new_doc_json_str, '"' .. EMPTY_ARRAY_SENTINEL .. '"', '[]')
+
     redis.call('SET', key, new_doc_json_str)
 end
 
@@ -1418,12 +1574,14 @@ end
 if start_idx > stop_idx or array_len == 0 then
     -- Target array becomes empty
     if is_root_path then
-        current_doc = empty_array() -- Special empty array with metatable for cjson
+        -- current_doc = empty_array() -- Old way
+        current_doc = EMPTY_ARRAY_SENTINEL -- Replace with sentinel
     else
-        -- Need to set the new empty array back at the path
+        -- Need to set the new empty array (sentinel) back at the path
         local path_segments = parse_path(path_str) -- Re-parse, error checked above
-        local success, err_set = set_value_at_path(current_doc, path_segments, empty_array(), false)
-        if not success then return redis.error_reply('ERR_SET_PATH Failed to set empty array: ' .. err_set) end
+        -- local success, err_set = set_value_at_path(current_doc, path_segments, empty_array(), false) -- Old way
+        local success, err_set = set_value_at_path(current_doc, path_segments, EMPTY_ARRAY_SENTINEL, false)
+        if not success then return redis.error_reply('ERR_SET_PATH Failed to set empty array sentinel: ' .. err_set) end
     end
 else
     -- Convert 0-based normalized start/stop to 1-based Lua indices for iteration
@@ -1444,27 +1602,78 @@ else
     end
 end
 
+-- Before encoding, ensure any other empty arrays in the document are also marked with sentinel
+if type(current_doc) == 'table' then -- Only if current_doc is a table (not already a sentinel itself)
+    replace_empty_arrays_with_sentinel_recursive(current_doc)
+end
+
 local new_doc_json_str, err_encode = cjson.encode(current_doc)
 if not new_doc_json_str then
     return redis.error_reply('ERR_ENCODE Failed to encode document after array trim: ' .. (err_encode or 'unknown error'))
 end
 
+-- Replace sentinel string with actual empty array JSON '[]' AFTER encoding
+new_doc_json_str = string.gsub(new_doc_json_str, '"' .. EMPTY_ARRAY_SENTINEL .. '"', '[]')
+
 redis.call('SET', key, new_doc_json_str)
 
 -- Get the length of the array *at the path* after modification.
--- If the path was root, current_doc is the array.
--- If path was not root, we need to re-fetch the (potentially new) array at path.
-local final_array_at_path = current_doc
-if not is_root_path then
+local final_array_at_path_value -- Can be table, sentinel, or nil
+if is_root_path then
+    -- If root was set to sentinel, current_doc is the sentinel string.
+    -- If root was trimmed to an actual array, current_doc is that array table.
+    -- cjson.encode would have been called on it. For length, we need the Lua representation.
+    -- This is tricky because current_doc was just encoded. We need the state *before* encode for length.
+    -- Let's re-evaluate: the `new_array` or the `EMPTY_ARRAY_SENTINEL` is what we need length of.
+
+    if start_idx > stop_idx or array_len == 0 then -- Condition for empty array
+        final_array_at_path_value = EMPTY_ARRAY_SENTINEL
+    else
+        final_array_at_path_value = new_array -- This was the new array table
+    end
+else
+    -- Path was not root. We need to get the value from the modified current_doc structure.
+    -- The replace_empty_arrays_with_sentinel_recursive might have changed it.
+    -- And set_value_at_path would have placed either `new_array` or `EMPTY_ARRAY_SENTINEL`.
+    -- We need to re-get it from the *Lua table structure* before it was JSON encoded.
     local path_segments_final = parse_path(path_str)
-    final_array_at_path = get_value_at_path(current_doc, path_segments_final)
-    if final_array_at_path == nil or type(final_array_at_path) ~= 'table' then
-        -- This should not happen if set_value_at_path was successful.
-        return redis.error_reply('ERR_INTERNAL Could not retrieve array after trim to determine length')
+    if path_segments_final then
+         -- IMPORTANT: get_value_at_path should operate on the Lua table `current_doc`
+         -- *before* it's potentially replaced by EMPTY_ARRAY_SENTINEL if it was root.
+         -- If current_doc became EMPTY_ARRAY_SENTINEL (root case), this path access is invalid.
+         -- This logic needs to be careful based on what `current_doc` is.
+
+        if type(current_doc) == 'table' then
+            final_array_at_path_value = get_value_at_path(current_doc, path_segments_final)
+        elseif current_doc == EMPTY_ARRAY_SENTINEL and is_root_path then
+             -- This case is already handled by the is_root_path block above.
+             -- This path means current_doc is a sentinel, so path access is not meaningful for length.
+             -- This should align with the `final_array_at_path_value` set in the is_root_path block.
+        else
+            -- Fallback or error if current_doc is not a table and not root sentinel
+            return redis.error_reply('ERR_INTERNAL_TRIM Cannot determine final array state for length calculation.')
+        end
+    else
+        return redis.error_reply('ERR_INTERNAL_TRIM Invalid path for final length calculation.')
     end
 end
 
-return #final_array_at_path
+local final_length = 0
+if type(final_array_at_path_value) == 'table' then
+    final_length = #final_array_at_path_value
+elseif final_array_at_path_value == EMPTY_ARRAY_SENTINEL then
+    final_length = 0
+else
+    -- If final_array_at_path_value is nil (e.g. path didn't exist in current_doc after modifications)
+    -- or some other type, this implies an issue or that the path no longer points to an array/sentinel.
+    -- For a successful trim, it should be one of the above.
+    -- If an error occurred setting it, it would have returned earlier.
+    -- If path points to something else not set by this script, it's an issue.
+    -- Defaulting to 0, but ideally this state shouldn't be reached if logic is correct.
+    final_length = 0 -- Or perhaps an error, but RedisJSON typically returns a length.
+end
+
+return final_length
 )lua";
 
 LuaScriptManager::LuaScriptManager(RedisConnectionManager* conn_manager)
