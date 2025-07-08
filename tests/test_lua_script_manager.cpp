@@ -1027,6 +1027,217 @@ TEST_F(LuaScriptManagerJsonClearTest, ClearObjectWithOnlyNonClearableFields) {
     EXPECT_EQ(get_current_json(), initial_doc); // Document should be unchanged
 }
 
+// --- Tests for JSON_ARRINDEX_LUA ---
+class LuaScriptManagerArrIndexTest : public LuaScriptManagerTest {
+protected:
+    std::string test_key_ = "luatest:arrindex";
+
+    void SetUp() override {
+        LuaScriptManagerTest::SetUp(); // Call base SetUp
+        if (live_redis_available_) {
+            try {
+                script_manager_.preload_builtin_scripts();
+                ASSERT_TRUE(script_manager_.is_script_loaded("json_arrindex"));
+                auto conn = conn_manager_.get_connection();
+                redisReply* reply = conn->command("DEL %s", test_key_.c_str());
+                if (reply) freeReplyObject(reply);
+            } catch (const std::exception& e) {
+                GTEST_SKIP() << "Skipping ArrIndex tests, setup failed: " << e.what();
+            }
+        } else {
+            GTEST_SKIP() << "Skipping ArrIndex tests, live Redis required.";
+        }
+    }
+
+    void TearDown() override {
+        if (live_redis_available_) {
+            try {
+                auto conn = conn_manager_.get_connection();
+                redisReply* reply = conn->command("DEL %s", test_key_.c_str());
+                 if (reply) freeReplyObject(reply);
+            } catch (...) { /* ignore cleanup errors */ }
+        }
+        LuaScriptManagerTest::TearDown();
+    }
+
+    void set_initial_json(const json& doc) {
+        auto conn = conn_manager_.get_connection();
+        std::string doc_str = doc.dump();
+        RedisReplyPtr reply(static_cast<redisReply*>(conn->command("SET %s %s", test_key_.c_str(), doc_str.c_str())));
+        ASSERT_NE(reply, nullptr);
+        ASSERT_EQ(reply->type, REDIS_REPLY_STATUS);
+        ASSERT_STREQ(reply->str, "OK");
+    }
+
+    long long execute_arrindex_script(const std::string& path, const std::string& value_json_str,
+                                   const std::optional<std::string>& start_index_str = std::nullopt,
+                                   const std::optional<std::string>& end_index_str = std::nullopt) {
+        std::vector<std::string> args = {path, value_json_str};
+        if (start_index_str.has_value()) {
+            args.push_back(start_index_str.value());
+        } else {
+            args.push_back(""); // Lua script expects placeholders if not provided
+        }
+        if (end_index_str.has_value()) {
+            args.push_back(end_index_str.value());
+        } else {
+            args.push_back("");
+        }
+        json result = script_manager_.execute_script("json_arrindex", {test_key_}, args);
+        if (!result.is_number_integer()) {
+            throw std::runtime_error("ARRINDEX script did not return an integer. Got: " + result.dump());
+        }
+        return result.get<long long>();
+    }
+};
+
+TEST_F(LuaScriptManagerArrIndexTest, FindStringValue) {
+    set_initial_json(json{{"arr", {"hello", "world", "hello", "again"}}});
+    EXPECT_EQ(execute_arrindex_script("arr", R"("world")"), 1);
+    EXPECT_EQ(execute_arrindex_script("arr", R"("hello")"), 0); // First occurrence
+}
+
+TEST_F(LuaScriptManagerArrIndexTest, FindNumericValue) {
+    set_initial_json(json{{"arr", {10, 20.5, 30, 20.5}}});
+    EXPECT_EQ(execute_arrindex_script("arr", "20.5"), 1);
+    EXPECT_EQ(execute_arrindex_script("arr", "30"), 2);
+}
+
+TEST_F(LuaScriptManagerArrIndexTest, FindBooleanValue) {
+    set_initial_json(json{{"arr", {true, false, true}}});
+    EXPECT_EQ(execute_arrindex_script("arr", "false"), 1);
+    EXPECT_EQ(execute_arrindex_script("arr", "true"), 0);
+}
+
+TEST_F(LuaScriptManagerArrIndexTest, FindNullValue) {
+    set_initial_json(json{{"arr", {"a", nullptr, "b", nullptr}}});
+    EXPECT_EQ(execute_arrindex_script("arr", "null"), 1);
+}
+
+TEST_F(LuaScriptManagerArrIndexTest, ValueNotFound) {
+    set_initial_json(json{{"arr", {"a", "b", "c"}}});
+    EXPECT_EQ(execute_arrindex_script("arr", R"("d")"), -1);
+}
+
+TEST_F(LuaScriptManagerArrIndexTest, EmptyArray) {
+    set_initial_json(json{{"arr", json::array()}});
+    EXPECT_EQ(execute_arrindex_script("arr", R"("a")"), -1);
+}
+
+TEST_F(LuaScriptManagerArrIndexTest, WithStartIndex) {
+    set_initial_json(json{{"arr", {"a", "b", "a", "c"}}});
+    EXPECT_EQ(execute_arrindex_script("arr", R"("a")", "1"), 2); // Search "a" starting from index 1
+    EXPECT_EQ(execute_arrindex_script("arr", R"("a")", "0"), 0);
+    EXPECT_EQ(execute_arrindex_script("arr", R"("a")", "3"), -1); // Start index past last 'a'
+}
+
+TEST_F(LuaScriptManagerArrIndexTest, WithStartAndEndIndex) {
+    set_initial_json(json{{"arr", {"a", "b", "c", "a", "d", "a"}}}); // indices: 0,1,2,3,4,5
+    EXPECT_EQ(execute_arrindex_script("arr", R"("a")", "1", "4"), 3); // Search "a" in slice [b,c,a,d] (indices 1-4)
+    EXPECT_EQ(execute_arrindex_script("arr", R"("a")", "0", "2"), 0); // Search "a" in slice [a,b,c] (indices 0-2)
+    EXPECT_EQ(execute_arrindex_script("arr", R"("c")", "1", "1"), -1); // Search "c" in slice [b]
+    EXPECT_EQ(execute_arrindex_script("arr", R"("b")", "1", "1"), 1); // Search "b" in slice [b]
+}
+
+TEST_F(LuaScriptManagerArrIndexTest, NegativeStartIndex) {
+    set_initial_json(json{{"arr", {"a", "b", "a", "c"}}}); // len 4
+    // -1 means last element (index 3, "c"). Search "a" starting from "c". Expected -1
+    EXPECT_EQ(execute_arrindex_script("arr", R"("a")", "-1"), -1);
+    // -2 means "a" (index 2). Search "a" starting from "a" (idx 2). Expected 2.
+    EXPECT_EQ(execute_arrindex_script("arr", R"("a")", "-2"), 2);
+    // -4 means "a" (index 0). Search "a" starting from "a" (idx 0). Expected 0.
+    EXPECT_EQ(execute_arrindex_script("arr", R"("a")", "-4"), 0);
+     // -5 means effectively index 0.
+    EXPECT_EQ(execute_arrindex_script("arr", R"("a")", "-5"), 0);
+}
+
+TEST_F(LuaScriptManagerArrIndexTest, NegativeEndIndex) {
+    set_initial_json(json{{"arr", {"a", "b", "c", "a", "d"}}}); // len 5. Indices 0,1,2,3,4
+    // Search "a" from start (0) up to 2nd last (-2, which is "a" at index 3)
+    EXPECT_EQ(execute_arrindex_script("arr", R"("a")", "0", "-2"), 0);
+    // Search "a" from start (0) up to last element (-1, which is "d" at index 4)
+    EXPECT_EQ(execute_arrindex_script("arr", R"("a")", "0", "-1"), 0);
+    // Search "d" from start (0) up to last element (-1, "d" at index 4)
+    EXPECT_EQ(execute_arrindex_script("arr", R"("d")", "0", "-1"), 4);
+}
+
+TEST_F(LuaScriptManagerArrIndexTest, StartIndexAfterEndIndex) {
+    set_initial_json(json{{"arr", {"a", "b", "c"}}});
+    EXPECT_EQ(execute_arrindex_script("arr", R"("a")", "2", "1"), -1);
+}
+
+TEST_F(LuaScriptManagerArrIndexTest, IndicesOutOfBounds) {
+    set_initial_json(json{{"arr", {"a", "b", "c"}}}); // len 3
+    EXPECT_EQ(execute_arrindex_script("arr", R"("a")", "5"), -1); // Start index too high
+    EXPECT_EQ(execute_arrindex_script("arr", R"("a")", "0", "10"), 0); // End index too high, clamped
+    EXPECT_EQ(execute_arrindex_script("arr", R"("c")", "0", "1"), -1); // 'c' is at index 2, range [0,1]
+}
+
+TEST_F(LuaScriptManagerArrIndexTest, ErrorKeyNotFound) {
+    EXPECT_THROW({ execute_arrindex_script("$", R"("val")"); }, LuaScriptException);
+}
+
+TEST_F(LuaScriptManagerArrIndexTest, ErrorPathNotFound) {
+    set_initial_json({{"some", "object"}});
+    EXPECT_THROW({ execute_arrindex_script("data.list", R"("val")"); }, LuaScriptException);
+}
+
+TEST_F(LuaScriptManagerArrIndexTest, ErrorNotAnArray) {
+    set_initial_json({{"arr", "this is a string"}});
+    EXPECT_THROW({ execute_arrindex_script("arr", R"("val")"); }, LuaScriptException);
+}
+
+TEST_F(LuaScriptManagerArrIndexTest, ErrorInvalidPathSyntax) {
+    set_initial_json({{"arr", {1,2}}});
+    EXPECT_THROW({ execute_arrindex_script("arr..invalid", R"("val")"); }, LuaScriptException);
+}
+
+TEST_F(LuaScriptManagerArrIndexTest, ErrorValueToFindNotJsonScalar) {
+    set_initial_json({{"arr", {1,2}}});
+    // The Lua script's cjson.decode will error on non-JSON.
+    EXPECT_THROW({ execute_arrindex_script("arr", "not_json_value"); }, LuaScriptException);
+    // Test with a valid JSON structure that isn't a scalar (though script implies scalar focus)
+    // Current script will try to compare, might work for empty object/array if also in target array.
+    // For simplicity, client should enforce scalar, but testing script's robustness.
+    // EXPECT_EQ(execute_arrindex_script("arr", "{}"), -1); // Assuming {} is not in {1,2}
+}
+
+TEST_F(LuaScriptManagerArrIndexTest, ErrorInvalidStartIndex) {
+    set_initial_json({{"arr", {1,2}}});
+    EXPECT_THROW({ execute_arrindex_script("arr", "1", "not_a_number"); }, LuaScriptException);
+}
+
+TEST_F(LuaScriptManagerArrIndexTest, ErrorInvalidEndIndex) {
+    set_initial_json({{"arr", {1,2}}});
+    EXPECT_THROW({ execute_arrindex_script("arr", "1", "0", "not_a_number_either"); }, LuaScriptException);
+}
+
+TEST_F(LuaScriptManagerArrIndexTest, PathIsRootAndRootIsArray) {
+    set_initial_json(json::array({"root_val", 100}));
+    EXPECT_EQ(execute_arrindex_script("$", "100"), 1);
+    EXPECT_EQ(execute_arrindex_script("$", R"("root_val")"), 0);
+    EXPECT_EQ(execute_arrindex_script("$", R"("not_found")"), -1);
+}
+
+TEST_F(LuaScriptManagerArrIndexTest, PathIsRootAndRootIsNotArray) {
+    set_initial_json({{"key", "value"}}); // Root is an object
+    EXPECT_THROW({ execute_arrindex_script("$", R"("value")"); }, LuaScriptException);
+}
+
+TEST_F(LuaScriptManagerArrIndexTest, ComplexNestedPathToArray) {
+    json doc = {
+        {"level1", {
+            {"level2", {
+                {"my_array", {"find_me", "dont_find"}}
+            }}
+        }}
+    };
+    set_initial_json(doc);
+    EXPECT_EQ(execute_arrindex_script("level1.level2.my_array", R"("find_me")"), 0);
+    EXPECT_EQ(execute_arrindex_script("level1.level2.my_array", R"("find_me")", "0", "0"), 0);
+    EXPECT_EQ(execute_arrindex_script("level1.level2.my_array", R"("find_me")", "1", "1"), -1);
+}
+
 TEST_F(LuaScriptManagerJsonClearTest, ClearObjectWithEmptyNestedArrayAndObject) {
     json initial_doc = {
         {"num", 10},
