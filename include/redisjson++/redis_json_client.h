@@ -242,6 +242,9 @@ private:
     json _get_document_for_modification(const std::string& key) const;
     void _set_document_after_modification(const std::string& key, const json& document, const SetOptions& opts);
 
+    // Helper to check if in legacy mode with Lua support
+    void throwIfNotLegacyWithLua(const std::string& operation_name) const;
+
     // Placeholder for direct Redis command execution if DBConnector supports it (for legacy Lua scripts if adapted)
     // RedisReplyPtr _execute_redis_command(const char* format, ...);
     // RedisReplyPtr _execute_redis_command_argv(int argc, const char **argv, const size_t *argvlen);

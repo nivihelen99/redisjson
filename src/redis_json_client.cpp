@@ -1176,6 +1176,91 @@ bool RedisJSONClient::set_json_sparse(const std::string& key, const json& sparse
     return false;
 }
 
+
+void RedisJSONClient::throwIfNotLegacyWithLua(const std::string& operation_name) const {
+    if (_is_swss_mode) {
+        throw NotImplementedException("Operation '" + operation_name + "' is not supported in SWSS mode with Lua-like atomicity.");
+    }
+    if (!_lua_script_manager) {
+        throw RedisJSONException("LuaScriptManager not initialized for operation '" + operation_name + "'.");
+    }
+}
+
+long long RedisJSONClient::arrindex(const std::string& key,
+                                    const std::string& path,
+                                    const json& value_to_find,
+                                    std::optional<long long> start_index,
+                                    std::optional<long long> end_index) {
+    if (_is_swss_mode) {
+        // SWSS mode: client-side GET, parse, search, no atomicity.
+        json doc = get_json(key); // Throws if key not found
+        json target_array_node;
+        try {
+            target_array_node = _json_modifier->get(doc, _path_parser->parse(path));
+        } catch (const PathNotFoundException&) {
+            throw PathNotFoundException(key, path + " (in document for ARRINDEX)");
+        } catch (const std::exception& e) {
+             throw InvalidPathException("Error accessing path '" + path + "' for ARRINDEX: " + e.what());
+        }
+
+        if (!target_array_node.is_array()) {
+            throw TypeMismatchException(path, "array", target_array_node.type_name());
+        }
+        if (!value_to_find.is_primitive() && !value_to_find.is_null()) {
+             throw TypeMismatchException(path, "scalar", value_to_find.type_name());
+        }
+
+        long long current_start_idx = 0;
+        if (start_index.has_value()) {
+            current_start_idx = start_index.value();
+            if (current_start_idx < 0) {
+                current_start_idx = static_cast<long long>(target_array_node.size()) + current_start_idx;
+            }
+        }
+        if (current_start_idx < 0) current_start_idx = 0;
+
+
+        long long current_end_idx = static_cast<long long>(target_array_node.size()) - 1;
+        if (end_index.has_value()) {
+            current_end_idx = end_index.value();
+             if (current_end_idx < 0) {
+                current_end_idx = static_cast<long long>(target_array_node.size()) + current_end_idx;
+            }
+        }
+        if (current_end_idx >= static_cast<long long>(target_array_node.size())) {
+             current_end_idx = static_cast<long long>(target_array_node.size()) - 1;
+        }
+
+        if (current_start_idx > current_end_idx || target_array_node.empty() || current_start_idx >= static_cast<long long>(target_array_node.size()) ) {
+            return -1;
+        }
+
+        for (long long i = current_start_idx; i <= current_end_idx; ++i) {
+            if (target_array_node.at(static_cast<size_t>(i)) == value_to_find) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    // Non-SWSS mode (Lua script)
+    throwIfNotLegacyWithLua("arrindex");
+    std::string value_json_str = value_to_find.dump();
+    std::string start_str = start_index.has_value() ? std::to_string(start_index.value()) : "";
+    std::string end_str = end_index.has_value() ? std::to_string(end_index.value()) : "";
+
+    json script_result = _lua_script_manager->execute_script(
+        "json_arrindex",
+        {key},
+        {path, value_json_str, start_str, end_str}
+    );
+
+    if (script_result.is_number_integer()) {
+        return script_result.get<long long>();
+    }
+    throw JsonParsingException("JSON.ARRINDEX script did not return an integer as expected. Got: " + script_result.dump());
+}
+
 std::vector<std::string> RedisJSONClient::object_keys(const std::string& key, const std::string& path) {
     if (_is_swss_mode) {
         // Client-side implementation for SWSS mode:
