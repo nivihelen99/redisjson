@@ -844,6 +844,78 @@ bool RedisJSONClient::set_json_sparse(const std::string& key, const json& sparse
     return false;
 }
 
+std::vector<std::string> RedisJSONClient::object_keys(const std::string& key, const std::string& path) {
+    if (_is_swss_mode) {
+        // Client-side implementation for SWSS mode:
+        // 1. Get the full JSON document.
+        // 2. Navigate to the path.
+        // 3. If it's an object, extract keys.
+        // This is non-atomic.
+        json doc;
+        try {
+            doc = get_json(key); // Throws PathNotFoundException if key doesn't exist
+        } catch (const PathNotFoundException&) {
+            return {}; // Key not found, so no object keys
+        }
+
+        json target_node = doc;
+        if (path != "$" && path != "" && path != ".") { // PathParser might normalize "" to "$"
+            try {
+                // Use the existing get_path logic to extract the node at the path
+                // This relies on _json_modifier and _path_parser being correctly set up
+                // and get_path correctly extracting the sub-document.
+                target_node = _json_modifier->get(doc, _path_parser->parse(path));
+            } catch (const PathNotFoundException&) {
+                return {}; // Path not found within the document
+            } catch (const json::exception& e) { // Catch errors from nlohmann during path traversal
+                throw InvalidPathException("Error accessing path '" + path + "' in key '" + key + "' for object_keys (SWSS): " + e.what());
+            }
+        }
+
+        if (target_node.is_object()) {
+            std::vector<std::string> keys_vec;
+            for (auto it = target_node.begin(); it != target_node.end(); ++it) {
+                keys_vec.push_back(it.key());
+            }
+            return keys_vec;
+        } else {
+            // Path does not point to an object, or path was root and root is not an object
+            return {};
+        }
+    } else { // Legacy mode (Lua script)
+        if (!_lua_script_manager) {
+            throw RedisJSONException("LuaScriptManager not initialized for object_keys.");
+        }
+
+        try {
+            json result = _lua_script_manager->execute_script("json_object_keys", {key}, {path});
+
+            if (result.is_null()) { // Lua script returns nil (json null) for non-object/path-not-found/key-not-found
+                return {};
+            }
+            if (result.is_array()) {
+                std::vector<std::string> keys_vec;
+                for (const auto& item : result) {
+                    if (item.is_string()) {
+                        keys_vec.push_back(item.get<std::string>());
+                    } else {
+                        throw JsonParsingException("Lua script json_object_keys returned non-string element in array for key '" + key + "', path '" + path + "'");
+                    }
+                }
+                return keys_vec;
+            }
+            // Should be an array or null. If something else, it's unexpected.
+            throw RedisCommandException("json_object_keys", "Unexpected reply format from Lua script for key '" + key + "', path '" + path + "'. Expected array or null, got: " + result.dump());
+        } catch (const LuaScriptException& e) {
+            // Check if the error message indicates a path not found or type error that should result in empty list
+            // This depends on how strictly the Lua script reports errors vs. returns nil for "not found" conditions.
+            // The current Lua script is designed to return nil for "not found" or "not an object".
+            // So, a LuaScriptException here is likely a more fundamental script error or Redis error.
+            throw; // Re-throw LuaScriptException
+        }
+    }
+}
+
 // --- Utility Operations ---
 
 std::vector<std::string> RedisJSONClient::keys_by_pattern(const std::string& pattern) const {
