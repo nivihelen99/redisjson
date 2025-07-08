@@ -1341,14 +1341,16 @@ long long RedisJSONClient::json_clear(const std::string& key, const std::string&
             throw RedisJSONException("JSON.CLEAR script returned an unexpected string: " + result_json.get<std::string>());
         }
         else {
-            // Fix 3: String concatenation
-            throw TypeMismatchException("JSON.CLEAR", "Unexpected result type from Lua script: " + std::string(result_json.type_name()));
+            // Fix 3 & new fix for constructor: String concatenation and use single-arg constructor
+            throw TypeMismatchException("JSON.CLEAR: Unexpected result type from Lua script: " + std::string(result_json.type_name()));
         }
     } catch (const LuaScriptException& e) {
         std::string what_str = e.what();
         if (what_str.find("ERR document not found") != std::string::npos) {
-            // Fix 4: Pass script name directly
-            throw PathNotFoundException(key, path, "Document not found for JSON.CLEAR operation on non-root path.", "json_clear");
+            // Fix 4 & new fix for constructor: Use two-arg constructor
+            // The specific error message from Lua ("ERR document not found") will be in e.what()
+            // The PathNotFoundException will then provide key and path context.
+            throw PathNotFoundException(key, path);
         }
         throw;
     } catch (const RedisJSONException& e) {
