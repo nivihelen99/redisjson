@@ -75,6 +75,8 @@ public:
                    int index = -1); // -1 for last element
     void array_insert(json& document, const std::vector<PathParser::PathElement>& path_elements,
                       int index, const json& value_to_insert);
+    long long array_trim(json& document, const std::vector<PathParser::PathElement>& path_elements,
+                         long long start, long long stop);
     // size_t array_length(const json& document, const std::vector<PathParser::PathElement>& path_elements) const; // In requirements but might be better in get_size or similar
 
     // Utility Operations

@@ -24,22 +24,28 @@ protected:
     // In a real CI, this could be controlled by environment variables or build tags.
     bool live_redis_available_ = false;
 
-    LuaScriptManagerTest() :
-        client_config_(), // Default config (localhost:6379)
-        conn_manager_(client_config_),
-        script_manager_(&conn_manager_) {
+    // Helper function to create a ClientConfig with a short timeout
+    static ClientConfig CreateTestClientConfig() {
+        ClientConfig config;
+        config.timeout = std::chrono::milliseconds(200);
+        // Potentially set host/port here if not default, e.g. from env vars for testing flexibility
+        return config;
+    }
 
+    LuaScriptManagerTest() :
+        client_config_(CreateTestClientConfig()), // Initialize with short timeout
+        conn_manager_(client_config_),           // conn_manager uses this config
+        script_manager_(&conn_manager_)          // script_manager uses the conn_manager
+    {
         // Basic check if Redis might be running for more meaningful tests
-        // This is a very crude check. A proper setup would use a dedicated test Redis.
         try {
-        // Directly use RedisConnection for the availability check
-        // Using default client_config_ for host, port, timeout settings.
+        // Use a new RedisConnection with the short timeout for the check
         redisjson::RedisConnection test_conn(
             client_config_.host,
             client_config_.port,
             client_config_.password,
             client_config_.database,
-            client_config_.timeout
+            client_config_.timeout // This is already the short timeout
         );
         if (test_conn.connect() && test_conn.ping()) {
                 live_redis_available_ = true;
@@ -257,6 +263,231 @@ TEST_F(LuaScriptManagerArrInsertTest, InsertIntoNestedArray) {
     EXPECT_EQ(result.get<long long>(), 3);
     json expected_doc = {{"data", {{"list", {"x", "y", "z"}}}}};
     EXPECT_EQ(get_current_json(), expected_doc);
+}
+
+// --- Tests for JSON_ARRAY_TRIM_LUA ---
+class LuaScriptManagerArrTrimTest : public LuaScriptManagerTest {
+protected:
+    std::string test_key_ = "luatest:arrtrim";
+
+    void SetUp() override {
+        LuaScriptManagerTest::SetUp(); // Call base SetUp
+        if (live_redis_available_) {
+            try {
+                script_manager_.preload_builtin_scripts();
+                ASSERT_TRUE(script_manager_.is_script_loaded("json_array_trim"));
+                auto conn = conn_manager_.get_connection();
+                redisReply* reply = conn->command("DEL %s", test_key_.c_str());
+                if (reply) freeReplyObject(reply);
+            } catch (const std::exception& e) {
+                GTEST_SKIP() << "Skipping ArrTrim tests, setup failed: " << e.what();
+            }
+        } else {
+            GTEST_SKIP() << "Skipping ArrTrim tests, live Redis required.";
+        }
+    }
+
+    void TearDown() override {
+        if (live_redis_available_) {
+            try {
+                auto conn = conn_manager_.get_connection();
+                redisReply* reply = conn->command("DEL %s", test_key_.c_str());
+                 if (reply) freeReplyObject(reply);
+            } catch (...) { /* ignore cleanup errors */ }
+        }
+        LuaScriptManagerTest::TearDown();
+    }
+
+    void set_initial_json(const json& doc) {
+        auto conn = conn_manager_.get_connection();
+        std::string doc_str = doc.dump();
+        RedisReplyPtr reply(static_cast<redisReply*>(conn->command("SET %s %s", test_key_.c_str(), doc_str.c_str())));
+        ASSERT_NE(reply, nullptr);
+        ASSERT_EQ(reply->type, REDIS_REPLY_STATUS);
+        ASSERT_STREQ(reply->str, "OK");
+    }
+
+    json get_current_json_at_path(const std::string& path = "$") {
+        auto conn = conn_manager_.get_connection();
+        RedisReplyPtr reply_get(static_cast<redisReply*>(conn->command("GET %s", test_key_.c_str())));
+        if (!reply_get || reply_get->type == REDIS_REPLY_NIL) return json(nullptr);
+        if (reply_get->type != REDIS_REPLY_STRING) throw std::runtime_error("GET failed in test verification");
+
+        json full_doc = json::parse(std::string(reply_get->str, reply_get->len));
+        if (path == "$" || path == "") return full_doc;
+
+        // Basic path navigation for test verification (not using PathParser for simplicity here)
+        // This is a very simplified path resolver for testing, assuming dot notation and simple indices.
+        json current = full_doc;
+        std::string p = path;
+        if (p.rfind("$.", 0) == 0) p = p.substr(2); // Remove $. prefix
+        else if (p.rfind("$[", 0) == 0) p = p.substr(1); // Remove $ prefix for root array e.g. $[0] -> [0]
+
+        size_t start_pos = 0;
+        while(start_pos < p.length()){
+            size_t dot_pos = p.find('.', start_pos);
+            size_t bracket_pos = p.find('[', start_pos);
+            std::string segment;
+
+            if (dot_pos != std::string::npos && (bracket_pos == std::string::npos || dot_pos < bracket_pos)) {
+                segment = p.substr(start_pos, dot_pos - start_pos);
+                start_pos = dot_pos + 1;
+                if (!current.is_object() || !current.contains(segment)) return json(nullptr); // Path segment not found
+                current = current[segment];
+            } else if (bracket_pos != std::string::npos && (dot_pos == std::string::npos || bracket_pos < dot_pos)) {
+                if (bracket_pos > start_pos) { // Key before bracket, e.g. obj[0]
+                     segment = p.substr(start_pos, bracket_pos - start_pos);
+                     if (!current.is_object() || !current.contains(segment)) return json(nullptr);
+                     current = current[segment];
+                }
+                size_t end_bracket_pos = p.find(']', bracket_pos);
+                if (end_bracket_pos == std::string::npos) return json(nullptr); // Malformed
+                std::string index_str = p.substr(bracket_pos + 1, end_bracket_pos - bracket_pos - 1);
+                try {
+                    int index = std::stoi(index_str);
+                    if (!current.is_array() || static_cast<size_t>(index) >= current.size() || index < 0) return json(nullptr);
+                    current = current[index];
+                } catch (const std::exception&) { return json(nullptr); /* Not a number */ }
+                start_pos = end_bracket_pos + 1;
+                if (start_pos < p.length() && p[start_pos] == '.') start_pos++; // Consume dot after bracket if present
+            } else {
+                segment = p.substr(start_pos);
+                if (!current.is_object() || !current.contains(segment)) return json(nullptr);
+                current = current[segment];
+                break;
+            }
+        }
+        return current;
+    }
+
+    long long execute_arrtrim_script(const std::string& path, long long start_idx, long long stop_idx) {
+        json result = script_manager_.execute_script("json_array_trim", {test_key_}, {path, std::to_string(start_idx), std::to_string(stop_idx)});
+        if (!result.is_number_integer()) {
+            throw std::runtime_error("ARRTRIM script did not return an integer. Got: " + result.dump());
+        }
+        return result.get<long long>();
+    }
+};
+
+TEST_F(LuaScriptManagerArrTrimTest, PositiveIndices) {
+    set_initial_json(json{{"arr", {0,1,2,3,4,5}}});
+    EXPECT_EQ(execute_arrtrim_script("arr", 1, 3), 3);
+    EXPECT_EQ(get_current_json_at_path("arr"), json({1,2,3}));
+}
+
+TEST_F(LuaScriptManagerArrTrimTest, NegativeStartIndex) {
+    set_initial_json(json{{"arr", {0,1,2,3,4,5}}}); // len 6
+    EXPECT_EQ(execute_arrtrim_script("arr", -3, 4), 2); // -3 is index 3. Trim [3,4] -> [3,4]
+    EXPECT_EQ(get_current_json_at_path("arr"), json({3,4}));
+}
+
+TEST_F(LuaScriptManagerArrTrimTest, NegativeStopIndex) {
+    set_initial_json(json{{"arr", {0,1,2,3,4,5}}}); // len 6
+    EXPECT_EQ(execute_arrtrim_script("arr", 1, -2), 4); // -2 is index 4. Trim [1,4] -> [1,2,3,4]
+    EXPECT_EQ(get_current_json_at_path("arr"), json({1,2,3,4}));
+}
+
+TEST_F(LuaScriptManagerArrTrimTest, BothNegativeIndices) {
+    set_initial_json(json{{"arr", {0,1,2,3,4,5}}}); // len 6
+    EXPECT_EQ(execute_arrtrim_script("arr", -4, -2), 3); // -4 is index 2, -2 is index 4. Trim [2,4] -> [2,3,4]
+    EXPECT_EQ(get_current_json_at_path("arr"), json({2,3,4}));
+}
+
+TEST_F(LuaScriptManagerArrTrimTest, StartGreaterThanStop) {
+    set_initial_json(json{{"arr", {0,1,2,3,4,5}}});
+    EXPECT_EQ(execute_arrtrim_script("arr", 3, 1), 0);
+    EXPECT_EQ(get_current_json_at_path("arr"), json::array());
+}
+
+TEST_F(LuaScriptManagerArrTrimTest, StartEqualsStop) {
+    set_initial_json(json{{"arr", {0,1,2,3,4,5}}});
+    EXPECT_EQ(execute_arrtrim_script("arr", 2, 2), 1);
+    EXPECT_EQ(get_current_json_at_path("arr"), json({2}));
+}
+
+TEST_F(LuaScriptManagerArrTrimTest, StartOutOfBoundsLargePositive) {
+    set_initial_json(json{{"arr", {0,1,2}}}); // len 3
+    // start=10 (normalized to 3), stop=12 (normalized to 2). start(3) > stop(2) -> empty
+    EXPECT_EQ(execute_arrtrim_script("arr", 10, 12), 0);
+    EXPECT_EQ(get_current_json_at_path("arr"), json::array());
+}
+
+TEST_F(LuaScriptManagerArrTrimTest, StopOutOfBoundsLargePositive) {
+    set_initial_json(json{{"arr", {0,1,2,3,4}}}); // len 5
+    // start=1, stop=10 (normalized to 4). Trim [1,4] -> [1,2,3,4]
+    EXPECT_EQ(execute_arrtrim_script("arr", 1, 10), 4);
+    EXPECT_EQ(get_current_json_at_path("arr"), json({1,2,3,4}));
+}
+
+TEST_F(LuaScriptManagerArrTrimTest, StartOutOfBoundsLargeNegative) {
+    set_initial_json(json{{"arr", {0,1,2}}}); // len 3
+    // start=-10 (normalized to 0), stop=1. Trim [0,1] -> [0,1]
+    EXPECT_EQ(execute_arrtrim_script("arr", -10, 1), 2);
+    EXPECT_EQ(get_current_json_at_path("arr"), json({0,1}));
+}
+
+TEST_F(LuaScriptManagerArrTrimTest, StopOutOfBoundsLargeNegative) {
+    set_initial_json(json{{"arr", {0,1,2}}}); // len 3
+    // start=1, stop=-10 (normalized to -1). start(1) > stop(-1) -> empty
+    EXPECT_EQ(execute_arrtrim_script("arr", 1, -10), 0);
+    EXPECT_EQ(get_current_json_at_path("arr"), json::array());
+}
+
+TEST_F(LuaScriptManagerArrTrimTest, TrimEmptyArray) {
+    set_initial_json(json{{"arr", json::array()}});
+    EXPECT_EQ(execute_arrtrim_script("arr", 0, 0), 0);
+    EXPECT_EQ(get_current_json_at_path("arr"), json::array());
+    EXPECT_EQ(execute_arrtrim_script("arr", 0, 10), 0); // Still empty
+    EXPECT_EQ(get_current_json_at_path("arr"), json::array());
+    EXPECT_EQ(execute_arrtrim_script("arr", -1, -1), 0); // Still empty
+    EXPECT_EQ(get_current_json_at_path("arr"), json::array());
+}
+
+TEST_F(LuaScriptManagerArrTrimTest, TrimRootArray) {
+    set_initial_json(json::array({0,1,2,3}));
+    EXPECT_EQ(execute_arrtrim_script("$", 1, 2), 2);
+    EXPECT_EQ(get_current_json_at_path("$"), json({1,2}));
+}
+
+TEST_F(LuaScriptManagerArrTrimTest, ErrorKeyNotFound) {
+    EXPECT_THROW({ execute_arrtrim_script("$", 0, 1); }, LuaScriptException);
+}
+
+TEST_F(LuaScriptManagerArrTrimTest, ErrorPathNotFound) {
+    set_initial_json({{"some", "object"}});
+    EXPECT_THROW({ execute_arrtrim_script("data.list", 0, 1); }, LuaScriptException);
+}
+
+TEST_F(LuaScriptManagerArrTrimTest, ErrorNotAnArray) {
+    set_initial_json({{"arr", "this is a string"}});
+    EXPECT_THROW({ execute_arrtrim_script("arr", 0, 1); }, LuaScriptException);
+}
+
+TEST_F(LuaScriptManagerArrTrimTest, ErrorInvalidStartIndexString) {
+    set_initial_json({{"arr", {1,2,3}}});
+    EXPECT_THROW({
+        script_manager_.execute_script("json_array_trim", {test_key_}, {"arr", "not_a_number", "1"});
+    }, LuaScriptException);
+}
+
+TEST_F(LuaScriptManagerArrTrimTest, ErrorInvalidStopIndexString) {
+    set_initial_json({{"arr", {1,2,3}}});
+    EXPECT_THROW({
+        script_manager_.execute_script("json_array_trim", {test_key_}, {"arr", "0", "not_a_number_either"});
+    }, LuaScriptException);
+}
+
+TEST_F(LuaScriptManagerArrTrimTest, TrimToExactSameArray) {
+    set_initial_json(json{{"arr", {0,1,2,3}}}); // len 4
+    EXPECT_EQ(execute_arrtrim_script("arr", 0, 3), 4);
+    EXPECT_EQ(get_current_json_at_path("arr"), json({0,1,2,3}));
+}
+
+TEST_F(LuaScriptManagerArrTrimTest, TrimWithStopIndexBeforeStartAfterNormalization) {
+    set_initial_json(json{{"arr", {0,1,2,3,4,5}}}); // len 6
+    // start = 5, stop = -5 (norm: 6-5=1). start(5) > stop(1) -> empty
+    EXPECT_EQ(execute_arrtrim_script("arr", 5, -5), 0);
+    EXPECT_EQ(get_current_json_at_path("arr"), json::array());
 }
 
 TEST_F(LuaScriptManagerArrInsertTest, ErrorKeyNotFound) {

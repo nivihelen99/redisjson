@@ -185,6 +185,7 @@ public:
                   int index = -1);
     size_t array_length(const std::string& key, const std::string& path) const;
     long long arrinsert(const std::string& key, const std::string& path, int index, const std::vector<json>& values);
+    long long json_array_trim(const std::string& key, const std::string& path, long long start_index, long long stop_index);
 
 
     // Merge Operations (client-side or specific command needed)
