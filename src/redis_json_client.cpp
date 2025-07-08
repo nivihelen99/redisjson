@@ -90,7 +90,7 @@ json RedisJSONClient::json_numincrby(const std::string& key, const std::string& 
         json doc = _get_document_for_modification(key); // Creates empty {} if key not found
         json current_value_at_path = json(nullptr);
         bool path_existed = true;
-        std::vector<PathSegment> parsed_path = _path_parser->parse(path);
+        std::vector<PathParser::PathElement> parsed_path = _path_parser->parse(path);
 
         try {
             current_value_at_path = _json_modifier->get(doc, parsed_path);
