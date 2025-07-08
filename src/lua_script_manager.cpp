@@ -969,10 +969,34 @@ const std::string LuaScriptManager::JSON_ARRAY_INSERT_LUA = LUA_COMMON_HELPERS +
     local values_to_insert = {}
     for i = 3, #ARGV do
         local val_json_str = ARGV[i]
-        local val, err_val = cjson.decode(val_json_str)
-        if not val and val_json_str ~= 'null' then
-            return redis.error_reply('ERR_DECODE_ARG Failed to decode value argument #' .. (i-2) .. ': ' .. (err_val or 'unknown error'))
+        local val -- This will hold the decoded value if successful
+        local err_msg -- This will hold the error message if decode fails
+
+        local success, result = pcall(cjson.decode, val_json_str)
+
+        if success then
+            val = result
+            -- If cjson.decode successfully returns Lua nil for an input that wasn't the string "null",
+            -- (e.g. if cjson.decode("") -> nil), treat it as a failure for consistency with original script's expectation.
+            -- Note: cjson.decode("null") results in `cjson.null`, not Lua `nil`.
+            -- `val == nil` checks for actual Lua nil.
+            if val == nil and val_json_str ~= "null" then
+                -- This specific path might indicate an unexpected behavior from cjson.decode for certain inputs (e.g. empty string)
+                -- if it returns Lua nil instead of erroring or returning a cjson.null or other value.
+                -- Standard cjson would typically error on empty string or malformed JSON.
+                err_msg = "Input string decoded to Lua nil, but input was not 'null'"
+                success = false -- Force error path below
+            end
+        else
+            -- pcall failed, result contains the error message from cjson.decode
+            err_msg = tostring(result) -- Ensure it's a string
         end
+
+        -- Check 'success' flag (from pcall, or overridden if decoded to nil for non-null input)
+        if not success then
+            return redis.error_reply('ERR_DECODE_ARG Failed to decode value argument #' .. (i-2) .. ' ("' .. val_json_str .. '"): ' .. (err_msg or 'unknown decode error'))
+        end
+
         table.insert(values_to_insert, val)
     end
 
