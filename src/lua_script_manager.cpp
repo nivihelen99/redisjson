@@ -1119,9 +1119,179 @@ const std::map<std::string, const std::string*> LuaScriptManager::SCRIPT_DEFINIT
     {"json_object_keys", &LuaScriptManager::JSON_OBJECT_KEYS_LUA},
     {"json_numincrby", &LuaScriptManager::JSON_NUMINCRBY_LUA},
     {"json_object_length", &LuaScriptManager::JSON_OBJECT_LENGTH_LUA},
-    {"json_array_insert", &LuaScriptManager::JSON_ARRAY_INSERT_LUA}
+    {"json_array_insert", &LuaScriptManager::JSON_ARRAY_INSERT_LUA},
+    {"json_clear", &LuaScriptManager::JSON_CLEAR_LUA}
     // Add any other scripts here if they are defined as static const std::string members
 };
+
+const std::string LuaScriptManager::JSON_CLEAR_LUA = LUA_COMMON_HELPERS + R"lua(
+-- Refined JSON_CLEAR_LUA (Attempt 3 to fix test failures)
+local function do_clear_recursive(target_value, is_target_array_hint)
+    local count = 0
+    local actually_modified_structure = false
+
+    if type(target_value) ~= 'table' then
+        return 0, false
+    end
+
+    local is_array = is_target_array_hint
+    if is_array == nil then
+        is_array = true; local n = 0
+        if next(target_value) == nil then is_array = true; else
+            for k, _ in pairs(target_value) do
+                n = n + 1
+                if type(k) ~= 'number' or k < 1 or k > n then is_array = false; break; end
+            end
+            if is_array and #target_value ~= n then is_array = false; end
+        end
+    end
+
+    if is_array then
+        if #target_value > 0 then
+            for i = #target_value, 1, -1 do
+                table.remove(target_value, i) -- Modifies target_value in place
+            end
+            count = 1
+            actually_modified_structure = true
+            -- No need to replace with cjson.decode('[]') here, as table.remove modifies in place.
+            -- The issue is when this modified (now empty) table is assigned back to its parent if it's a sub-element.
+            -- Or if target_value itself is the root.
+        else
+            count = 0 -- Already empty
+        end
+    else -- It's an object
+        local keys_to_iterate = {}
+        for k, _ in pairs(target_value) do table.insert(keys_to_iterate, k) end
+
+        for _, k in ipairs(keys_to_iterate) do
+            local v = target_value[k]
+            local item_modified_this_iteration = false
+
+            if type(v) == 'number' then
+                if target_value[k] ~= 0 then
+                    target_value[k] = 0
+                    count = count + 1
+                    item_modified_this_iteration = true
+                end
+            elseif type(v) == 'table' then
+                local sub_is_array_hint = nil; local sub_n_keys = 0;
+                if next(v) == nil then sub_is_array_hint = true; else
+                    for sk_sub,_ in pairs(v) do sub_n_keys = sub_n_keys+1; if type(sk_sub)~='number' or sk_sub<1 or sk_sub>sub_n_keys then sub_is_array_hint=false; break; end end
+                    if sub_is_array_hint == nil and #v ~= sub_n_keys then sub_is_array_hint = false; end
+                    if sub_is_array_hint == nil then sub_is_array_hint = true; end
+                end
+
+                local sub_cleared_count, sub_modified = do_clear_recursive(v, sub_is_array_hint)
+
+                if sub_cleared_count > 0 then count = count + sub_cleared_count; end
+                if sub_modified then item_modified_this_iteration = true; end
+
+                -- If the sub-table was an array and it's now empty due to clearing,
+                -- replace it with a proper empty array Lua table.
+                if sub_is_array_hint and #v == 0 and sub_modified then -- sub_modified ensures it became empty *due to clearing*
+                    target_value[k] = cjson.decode('[]') -- Replace with a table cjson knows is an array
+                end
+            end
+            if item_modified_this_iteration then actually_modified_structure = true; end
+        end
+    end
+    return count, actually_modified_structure
+end
+
+local key = KEYS[1]
+local path_str = ARGV[1]
+if path_str == nil then path_str = '$' end
+
+local current_json_str = redis.call('GET', key)
+
+if not current_json_str then
+    if path_str == '$' or path_str == '' then return 0; end
+    return redis.error_reply('ERR document not found')
+end
+
+local current_doc, err_decode = cjson.decode(current_json_str)
+if not current_doc then
+    return redis.error_reply('ERR_DECODE Failed to decode JSON for key ' .. key .. ': ' .. (err_decode or 'unknown error'))
+end
+
+local cleared_count = 0
+local doc_modified_overall = false -- Renamed for clarity
+
+if path_str == '$' or path_str == '' then
+    if type(current_doc) == 'table' then
+        local root_is_array = nil; local n_root_keys=0;
+        if next(current_doc)==nil then root_is_array=true; else
+            for k_root,_ in pairs(current_doc) do n_root_keys=n_root_keys+1; if type(k_root)~='number' or k_root<1 or k_root>n_root_keys then root_is_array=false; break; end end
+            if root_is_array==nil and #current_doc~=n_root_keys then root_is_array=false; end
+            if root_is_array==nil then root_is_array=true; end
+        end
+        cleared_count, doc_modified_overall = do_clear_recursive(current_doc, root_is_array)
+        if root_is_array and #current_doc == 0 and doc_modified_overall then
+             -- If root was an array and is now empty and was modified (cleared)
+             current_doc = cjson.decode('[]')
+        end
+    else
+        cleared_count = 1
+        -- doc_modified_overall remains false for scalar root
+    end
+else -- Path is not root
+    local path_segments = parse_path(path_str)
+    if path_segments == nil or (type(path_segments) == 'table' and path_segments.err) then
+        return redis.error_reply('ERR_PATH Invalid path string: ' .. path_str .. (path_segments.err or ''))
+    end
+
+    if #path_segments == 0 then -- Should be caught by root check
+         if type(current_doc) == 'table' then
+            local root_is_array_s = nil; local n_s_keys=0; if next(current_doc)==nil then root_is_array_s=true; else for ks,_ in pairs(current_doc) do n_s_keys=n_s_keys+1; if type(ks)~='number' or ks<1 or ks>n_s_keys then root_is_array_s=false;break;end;end;if root_is_array_s==nil and #current_doc ~= n_s_keys then root_is_array_s=false;end;if root_is_array_s==nil then root_is_array_s=true;end end
+            cleared_count, doc_modified_overall = do_clear_recursive(current_doc, root_is_array_s)
+            if root_is_array_s and #current_doc == 0 and doc_modified_overall then
+                 current_doc = cjson.decode('[]')
+            end
+        else cleared_count = 1; end
+    else
+        -- Traverse to the parent to get a reference to the target_value's container
+        local parent_ref = current_doc
+        for i = 1, #path_segments - 1 do
+            local segment = path_segments[i]
+            if type(parent_ref) ~= 'table' or parent_ref[segment] == nil then return 0; end -- Path not found
+            parent_ref = parent_ref[segment]
+        end
+
+        local final_segment = path_segments[#path_segments]
+        if type(parent_ref) ~= 'table' or parent_ref[final_segment] == nil then return 0; end -- Path not found
+
+        local target_value_ref = parent_ref[final_segment]
+
+        if type(target_value_ref) == 'table' then
+            local target_is_array_hint = nil; local n_target_keys=0; if next(target_value_ref)==nil then target_is_array_hint=true; else for kt,_ in pairs(target_value_ref) do n_target_keys=n_target_keys+1; if type(kt)~='number' or kt<1 or kt>n_target_keys then target_is_array_hint=false;break;end;end;if target_is_array_hint==nil and #target_value_ref ~= n_target_keys then target_is_array_hint=false;end;if target_is_array_hint==nil then target_is_array_hint=true;end end
+
+            local sub_cleared_count, sub_modified
+            sub_cleared_count, sub_modified = do_clear_recursive(target_value_ref, target_is_array_hint)
+            cleared_count = sub_cleared_count
+
+            if sub_modified then
+                doc_modified_overall = true
+                if target_is_array_hint and #target_value_ref == 0 then
+                    parent_ref[final_segment] = cjson.decode('[]') -- Replace in parent
+                end
+            end
+        else
+            cleared_count = 1
+            -- doc_modified_overall remains false for scalar target
+        end
+    end
+end
+
+if doc_modified_overall then
+    local new_doc_json_str, err_encode = cjson.encode(current_doc)
+    if not new_doc_json_str then
+        return redis.error_reply('ERR_ENCODE Failed to encode document: ' .. (err_encode or 'unknown error'))
+    end
+    redis.call('SET', key, new_doc_json_str)
+end
+
+return cleared_count
+)lua";
 
 const std::string* LuaScriptManager::get_script_body_by_name(const std::string& name) const {
     auto it = SCRIPT_DEFINITIONS.find(name);

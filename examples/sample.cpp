@@ -736,10 +736,10 @@ void run_numeric_operations(redisjson::RedisJSONClient& client) {
         try {
             client.json_numincrby("sample:numeric:non_existent_key", "counter", 1);
             std::cerr << "ERROR: json_numincrby on non-existent key did not throw as expected." << std::endl;
-        } catch (const redisjson::LuaScriptException& e) { // Lua script returns ERR_NOKEY
+        } catch (const redisjson::LuaScriptException& e) { // Lua script returns ERR_NOKEY or ERR document not found
             std::cout << "SUCCESS: Caught expected LuaScriptException for NUMINCRBY on non-existent key: " << e.what() << std::endl;
-        } catch (const redisjson::PathNotFoundException& e) { // For SWSS client-side check (get_json fails)
-             std::cout << "SUCCESS: Caught expected PathNotFoundException for NUMINCRBY on non-existent key (SWSS mode): " << e.what() << std::endl;
+        } catch (const redisjson::PathNotFoundException& e) { // This is what client method should throw for "ERR document not found"
+             std::cout << "SUCCESS: Caught expected PathNotFoundException for NUMINCRBY on non-existent key (SWSS mode or client conversion): " << e.what() << std::endl;
         }
 
 
@@ -749,6 +749,171 @@ void run_numeric_operations(redisjson::RedisJSONClient& client) {
 
     // Cleanup
     try { client.del_json(num_key); } catch (...) {}
+}
+
+void run_jsonclear_operations(redisjson::RedisJSONClient& client) {
+    print_header("JSON.CLEAR Operations");
+    std::string clear_key = "sample:clear:data";
+    long long cleared_count = 0; // Reuse this variable
+
+    // Preparatory cleanup for the key
+    try { client.del_json(clear_key); } catch(...) {}
+
+    // 1. Clear an array at root
+    json array_doc = {"a", "b", 1, 2, true, {{"nested_num", 10}}};
+    client.set_json(clear_key, array_doc);
+    std::cout << "Initial array document: " << client.get_json(clear_key).dump() << std::endl;
+    cleared_count = client.json_clear(clear_key, "$");
+    std::cout << "SUCCESS: Cleared root array. Count: " << cleared_count << std::endl;
+    std::cout << "Document after clearing root array: " << client.get_json(clear_key).dump() << std::endl;
+    if (client.get_json(clear_key) != json::array() || (!array_doc.empty() && cleared_count != 1) || (array_doc.empty() && cleared_count != 0) ) {
+        std::cerr << "VERIFICATION ERROR: Clearing root array. Expected count 1 if not empty, 0 if empty. Got: " << cleared_count << std::endl;
+    }
+    client.del_json(clear_key);
+
+    // 2. Clear an object at root
+    json object_doc = {
+        {"name", "test"},
+        {"count", 100},
+        {"active", true},
+        {"misc_null", nullptr},
+        {"nested_obj", {
+            {"value", 200},
+            {"sub_arr", {1,2}},
+            {"empty_arr_field", json::array()}
+        }},
+        {"tags", {"tag1", "tag2", 300}}
+    };
+    client.set_json(clear_key, object_doc);
+    std::cout << "\nInitial object document: " << client.get_json(clear_key).dump(2) << std::endl;
+    cleared_count = client.json_clear(clear_key, "$");
+    // Expected count:
+    // count: 100 -> 0 (1)
+    // nested_obj.value: 200 -> 0 (1)
+    // nested_obj.sub_arr: [1,2] -> [] (1)
+    // nested_obj.empty_arr_field: [] -> [] (0, as it was already empty)
+    // tags: ["tag1", "tag2", 300] -> [] (1)
+    // Total expected: 1+1+1+1 = 4
+    std::cout << "SUCCESS: Cleared root object. Count: " << cleared_count << std::endl;
+    std::cout << "Document after clearing root object:\n" << client.get_json(clear_key).dump(2) << std::endl;
+    json expected_cleared_obj = {
+        {"name", "test"}, {"count", 0}, {"active", true}, {"misc_null", nullptr},
+        {"nested_obj", {{"value", 0}, {"sub_arr", json::array()}, {"empty_arr_field", json::array()}}},
+        {"tags", json::array()}
+    };
+    if (client.get_json(clear_key) != expected_cleared_obj || cleared_count != 4) {
+        std::cerr << "VERIFICATION ERROR: Clearing root object. Expected count 4. Got: " << cleared_count << std::endl;
+    }
+
+
+    // 3. Clear a nested array (using the state from above)
+    // Current state: {"name":"test", "count":0, "active":true, "misc_null":null, "nested_obj":{"value":0, "sub_arr":[], "empty_arr_field":[]}, "tags":[]}
+    // Let's reset nested_obj.sub_arr to have items again for this sub-test
+    client.set_path(clear_key, "nested_obj.sub_arr", {5,6,7});
+    client.set_path(clear_key, "tags", {"new_tag"}); // also reset tags array
+    std::cout << "\nDocument for nested clear: " << client.get_json(clear_key).dump(2) << std::endl;
+
+    cleared_count = client.json_clear(clear_key, "nested_obj.sub_arr");
+    std::cout << "SUCCESS: Cleared path 'nested_obj.sub_arr'. Count: " << cleared_count << std::endl; // Expected: 1
+    std::cout << "Document after clearing 'nested_obj.sub_arr':\n" << client.get_json(clear_key).dump(2) << std::endl;
+    if (client.get_json(clear_key)["nested_obj"]["sub_arr"] != json::array() || cleared_count != 1) {
+         std::cerr << "VERIFICATION ERROR: Clearing nested_obj.sub_arr. Expected count 1. Got: " << cleared_count << std::endl;
+    }
+
+    // 4. Clear a nested object
+    // Current state of nested_obj: {"value":0, "sub_arr":[], "empty_arr_field":[]}
+    // client.set_path(clear_key, "nested_obj.value", 55); // make a number non-zero for testing
+    // No, the 'value' field is already 0 from the root clear. Let's use a fresh object.
+    client.del_json(clear_key);
+    json fresh_object_doc = {
+        {"id", "obj1"},
+        {"data", {
+            {"num1", 10},
+            {"str1", "hello"},
+            {"arr1", {1,2}}
+        }}
+    };
+    client.set_json(clear_key, fresh_object_doc);
+    std::cout << "\nFresh document for nested object clear: " << client.get_json(clear_key).dump(2) << std::endl;
+    cleared_count = client.json_clear(clear_key, "data");
+    // Expected count for clearing "data": 1 (for num1) + 1 (for arr1) = 2
+    std::cout << "SUCCESS: Cleared path 'data'. Count: " << cleared_count << std::endl;
+    std::cout << "Document after clearing 'data':\n" << client.get_json(clear_key).dump(2) << std::endl;
+    json expected_data_cleared = {{"id", "obj1"}, {"data", {{"num1",0}, {"str1","hello"}, {"arr1", json::array()}}}};
+    if (client.get_json(clear_key) != expected_data_cleared || cleared_count != 2) {
+         std::cerr << "VERIFICATION ERROR: Clearing 'data' object. Expected count 2. Got: " << cleared_count << std::endl;
+    }
+    client.del_json(clear_key);
+
+
+    // 5. Path to scalar
+    client.set_json(clear_key, {{"scalar_num", 123}, {"scalar_str", "hello"}});
+    std::cout << "\nInitial document for scalar clear: " << client.get_json(clear_key).dump() << std::endl;
+    cleared_count = client.json_clear(clear_key, "scalar_num");
+    std::cout << "SUCCESS: 'Cleared' path 'scalar_num'. Count: " << cleared_count << std::endl; // Expected: 1
+    std::cout << "Document after 'clearing' scalar_num: " << client.get_json(clear_key).dump() << std::endl; // Should be unchanged
+    if (client.get_json(clear_key)["scalar_num"] != 123 || cleared_count != 1) {
+        std::cerr << "VERIFICATION ERROR: Clearing path to scalar_num. Expected val 123, count 1. Got val "
+                  << client.get_json(clear_key)["scalar_num"].dump() << ", count " << cleared_count << std::endl;
+    }
+    cleared_count = client.json_clear(clear_key, "scalar_str");
+    std::cout << "SUCCESS: 'Cleared' path 'scalar_str'. Count: " << cleared_count << std::endl; // Expected: 1
+    std::cout << "Document after 'clearing' scalar_str: " << client.get_json(clear_key).dump() << std::endl; // Should be unchanged
+     if (client.get_json(clear_key)["scalar_str"] != "hello" || cleared_count != 1) {
+        std::cerr << "VERIFICATION ERROR: Clearing path to scalar_str. Expected val 'hello', count 1. Got val "
+                  << client.get_json(clear_key)["scalar_str"].dump() << ", count " << cleared_count << std::endl;
+    }
+    client.del_json(clear_key);
+
+    // 6. Path does not exist
+    client.set_json(clear_key, {{"a", 1}});
+    std::cout << "\nInitial document for non-existent path: " << client.get_json(clear_key).dump() << std::endl;
+    cleared_count = client.json_clear(clear_key, "non.existent.path");
+    std::cout << "SUCCESS: Attempted clear on 'non.existent.path'. Count: " << cleared_count << std::endl; // Expected: 0
+    if (cleared_count != 0) {
+        std::cerr << "VERIFICATION ERROR: Clearing non-existent path. Expected count 0. Got: " << cleared_count << std::endl;
+    }
+    client.del_json(clear_key);
+
+    // 7. Key does not exist
+    std::string non_existent_key = "sample:clear:no_such_key";
+    try { client.del_json(non_existent_key); } catch(...) {} // Ensure key is deleted
+
+    std::cout << "\nAttempting clear on non-existent key '" << non_existent_key << "' with root path:" << std::endl;
+    cleared_count = client.json_clear(non_existent_key, "$");
+    std::cout << "SUCCESS: Cleared non-existent key with root path. Count: " << cleared_count << std::endl; // Expected: 0
+    if (cleared_count != 0) {
+         std::cerr << "VERIFICATION ERROR: Clearing non-existent key (root path). Expected count 0. Got: " << cleared_count << std::endl;
+    }
+
+    std::cout << "\nAttempting clear on non-existent key '" << non_existent_key << "' with non-root path:" << std::endl;
+    try {
+        cleared_count = client.json_clear(non_existent_key, "some.path");
+        // This should throw PathNotFoundException due to Lua script returning "ERR document not found"
+        std::cerr << "ERROR: json_clear on non-existent key with non-root path did not throw PathNotFoundException. Returned count: " << cleared_count << std::endl;
+    } catch (const redisjson::PathNotFoundException& e) {
+        std::cout << "SUCCESS: Caught expected PathNotFoundException for non-existent key and non-root path: " << e.what() << std::endl;
+    } catch (const redisjson::RedisJSONException& e) { // Catch other specific RedisJSON errors
+        std::cerr << "ERROR: Unexpected RedisJSONException: " << e.what() << std::endl;
+    } catch (const std::exception& e) { // Catch any other std exceptions
+        std::cerr << "ERROR: Unexpected std::exception: " << e.what() << std::endl;
+    }
+
+    // 8. Clear empty array/object fields
+    client.set_json(clear_key, {{"empty_arr", json::array()}, {"empty_obj", json::object()}});
+    std::cout << "\nInitial doc with empty containers: " << client.get_json(clear_key).dump() << std::endl;
+    cleared_count = client.json_clear(clear_key, "empty_arr");
+    std::cout << "SUCCESS: Cleared 'empty_arr'. Count: " << cleared_count << std::endl; // Expected: 0 (was already empty)
+    if (cleared_count != 0) {
+        std::cerr << "VERIFICATION ERROR: Clearing empty_arr. Expected count 0. Got: " << cleared_count << std::endl;
+    }
+
+    cleared_count = client.json_clear(clear_key, "empty_obj");
+    std::cout << "SUCCESS: Cleared 'empty_obj'. Count: " << cleared_count << std::endl; // Expected: 0 (was already empty and no numbers to set to 0)
+    if (cleared_count != 0) {
+        std::cerr << "VERIFICATION ERROR: Clearing empty_obj. Expected count 0. Got: " << cleared_count << std::endl;
+    }
+    client.del_json(clear_key);
 }
 
 
@@ -782,12 +947,13 @@ int main() {
         run_document_operations(legacy_client);
         run_path_operations(legacy_client);
         run_array_operations(legacy_client);
-        run_arrinsert_operations(legacy_client); // <--- Added new demo for ARRINSERT
+        run_arrinsert_operations(legacy_client);
         run_array_operations_extended(legacy_client);
         run_atomic_operations(legacy_client);
         run_sparse_merge_operations(legacy_client);
         run_object_operations(legacy_client);
         run_numeric_operations(legacy_client);
+        run_jsonclear_operations(legacy_client); // Added this line
 
         print_header("Non-SWSS (Legacy) Mode Sample Program Finished");
 

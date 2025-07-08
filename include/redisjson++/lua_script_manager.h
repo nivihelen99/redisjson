@@ -115,6 +115,7 @@ private:
     static const std::string JSON_NUMINCRBY_LUA;
     static const std::string JSON_OBJECT_LENGTH_LUA; // Added for JSON.OBJLEN
     static const std::string JSON_ARRAY_INSERT_LUA;
+    static const std::string JSON_CLEAR_LUA;
     // ... other built-in scripts
 };
 

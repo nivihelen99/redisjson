@@ -808,3 +808,244 @@ TEST_F(LuaScriptManagerNumIncrByTest, NumericOverflowNegative) {
 //     ::testing::InitGoogleTest(&argc, argv);
 //     return RUN_ALL_TESTS();
 // }
+
+// --- Tests for JSON_CLEAR_LUA ---
+class LuaScriptManagerJsonClearTest : public LuaScriptManagerTest {
+protected:
+    std::string test_key_ = "luatest:jsonclear";
+
+    void SetUp() override {
+        LuaScriptManagerTest::SetUp(); // Call base SetUp
+        if (live_redis_available_) {
+            try {
+                script_manager_.preload_builtin_scripts();
+                ASSERT_TRUE(script_manager_.is_script_loaded("json_clear"));
+                auto conn = conn_manager_.get_connection();
+                redisReply* reply = conn->command("DEL %s", test_key_.c_str());
+                if (reply) freeReplyObject(reply);
+            } catch (const std::exception& e) {
+                GTEST_SKIP() << "Skipping JsonClear tests, setup failed: " << e.what();
+            }
+        } else {
+            GTEST_SKIP() << "Skipping JsonClear tests, live Redis required.";
+        }
+    }
+
+    void TearDown() override {
+        if (live_redis_available_) {
+            try {
+                auto conn = conn_manager_.get_connection();
+                redisReply* reply = conn->command("DEL %s", test_key_.c_str());
+                 if (reply) freeReplyObject(reply);
+            } catch (...) { /* ignore cleanup errors */ }
+        }
+        LuaScriptManagerTest::TearDown();
+    }
+
+    void set_initial_json(const json& doc) {
+        auto conn = conn_manager_.get_connection();
+        std::string doc_str = doc.dump();
+        RedisReplyPtr reply(static_cast<redisReply*>(conn->command("SET %s %s", test_key_.c_str(), doc_str.c_str())));
+        ASSERT_NE(reply, nullptr) << "Failed to SET initial JSON for test. Context: " << (conn_manager_.get_connection()->get_context() ? conn_manager_.get_connection()->get_context()->errstr : "N/A");
+        ASSERT_EQ(reply->type, REDIS_REPLY_STATUS) << "SET command failed: " << (reply->str ? reply->str : "Unknown error");
+        ASSERT_STREQ(reply->str, "OK");
+    }
+
+    json get_current_json() {
+        auto conn = conn_manager_.get_connection();
+        RedisReplyPtr reply(static_cast<redisReply*>(conn->command("GET %s", test_key_.c_str())));
+        if (!reply || reply->type == REDIS_REPLY_NIL) {
+            return json(nullptr); // Key does not exist or no value
+        }
+        if (reply->type != REDIS_REPLY_STRING) {
+            throw std::runtime_error("GET command did not return a string for key " + test_key_);
+        }
+        return json::parse(std::string(reply->str, reply->len));
+    }
+};
+
+TEST_F(LuaScriptManagerJsonClearTest, ClearRootArray) {
+    json initial_doc = {"a", "b", 123};
+    set_initial_json(initial_doc);
+    json result = script_manager_.execute_script("json_clear", {test_key_}, {"$"});
+    ASSERT_TRUE(result.is_number_integer());
+    EXPECT_EQ(result.get<long long>(), 1); // 1 array cleared
+    EXPECT_EQ(get_current_json(), json::array());
+}
+
+TEST_F(LuaScriptManagerJsonClearTest, ClearEmptyRootArray) {
+    set_initial_json(json::array());
+    json result = script_manager_.execute_script("json_clear", {test_key_}, {"$"});
+    ASSERT_TRUE(result.is_number_integer());
+    EXPECT_EQ(result.get<long long>(), 0); // Already empty
+    EXPECT_EQ(get_current_json(), json::array());
+}
+
+TEST_F(LuaScriptManagerJsonClearTest, ClearRootObject) {
+    json initial_doc = {
+        {"name", "test"},
+        {"count", 100},
+        {"active", true},
+        {"details", {{"value", 200}, {"items", {1,2}}}}
+    };
+    set_initial_json(initial_doc);
+    json result = script_manager_.execute_script("json_clear", {test_key_}, {"$"});
+    ASSERT_TRUE(result.is_number_integer());
+    // count: 100->0 (1), details.value: 200->0 (1), details.items: [1,2]->[] (1) = Total 3
+    EXPECT_EQ(result.get<long long>(), 3);
+
+    json expected_doc = {
+        {"name", "test"}, // string untouched
+        {"count", 0},     // number to 0
+        {"active", true}, // boolean untouched
+        {"details", {{"value", 0}, {"items", json::array()}}}
+    };
+    EXPECT_EQ(get_current_json(), expected_doc);
+}
+
+TEST_F(LuaScriptManagerJsonClearTest, ClearEmptyRootObject) {
+    set_initial_json(json::object());
+    json result = script_manager_.execute_script("json_clear", {test_key_}, {"$"});
+    ASSERT_TRUE(result.is_number_integer());
+    EXPECT_EQ(result.get<long long>(), 0);
+    EXPECT_EQ(get_current_json(), json::object());
+}
+
+TEST_F(LuaScriptManagerJsonClearTest, ClearNestedArray) {
+    json initial_doc = {{"data", {"list", {1,2,3}}}};
+    set_initial_json(initial_doc);
+    json result = script_manager_.execute_script("json_clear", {test_key_}, {"data.list"});
+    ASSERT_TRUE(result.is_number_integer());
+    EXPECT_EQ(result.get<long long>(), 1); // The array 'list' itself is cleared
+    json expected_doc = {{"data", {"list", json::array()}}};
+    EXPECT_EQ(get_current_json(), expected_doc);
+}
+
+TEST_F(LuaScriptManagerJsonClearTest, ClearNestedObject) {
+    json initial_doc = {{"config", {{"retries", 5}, {"timeout", 5000}, {"ports", {80,443}}}}};
+    set_initial_json(initial_doc);
+    json result = script_manager_.execute_script("json_clear", {test_key_}, {"config"});
+    ASSERT_TRUE(result.is_number_integer());
+    // retries: 5->0 (1), timeout: 5000->0 (1), ports: [80,443]->[] (1) = Total 3
+    EXPECT_EQ(result.get<long long>(), 3);
+    json expected_doc = {{"config", {{"retries", 0}, {"timeout", 0}, {"ports", json::array()}}}};
+    EXPECT_EQ(get_current_json(), expected_doc);
+}
+
+TEST_F(LuaScriptManagerJsonClearTest, PathToScalarNumber) {
+    set_initial_json({{"value", 123}});
+    json result = script_manager_.execute_script("json_clear", {test_key_}, {"value"});
+    ASSERT_TRUE(result.is_number_integer());
+    EXPECT_EQ(result.get<long long>(), 1); // Scalar "cleared" (touched)
+    EXPECT_EQ(get_current_json()["value"], 123); // Value unchanged
+}
+
+TEST_F(LuaScriptManagerJsonClearTest, PathToScalarString) {
+    set_initial_json({{"text", "hello"}});
+    json result = script_manager_.execute_script("json_clear", {test_key_}, {"text"});
+    ASSERT_TRUE(result.is_number_integer());
+    EXPECT_EQ(result.get<long long>(), 1); // Scalar "cleared"
+    EXPECT_EQ(get_current_json()["text"], "hello"); // Value unchanged
+}
+
+TEST_F(LuaScriptManagerJsonClearTest, PathToScalarBoolean) {
+    set_initial_json({{"flag", true}});
+    json result = script_manager_.execute_script("json_clear", {test_key_}, {"flag"});
+    ASSERT_TRUE(result.is_number_integer());
+    EXPECT_EQ(result.get<long long>(), 1); // Scalar "cleared"
+    EXPECT_EQ(get_current_json()["flag"], true); // Value unchanged
+}
+
+TEST_F(LuaScriptManagerJsonClearTest, PathToNull) {
+    set_initial_json({{"maybe", nullptr}});
+    json result = script_manager_.execute_script("json_clear", {test_key_}, {"maybe"});
+    ASSERT_TRUE(result.is_number_integer());
+    EXPECT_EQ(result.get<long long>(), 1); // Scalar "cleared"
+    EXPECT_TRUE(get_current_json()["maybe"].is_null()); // Value unchanged
+}
+
+
+TEST_F(LuaScriptManagerJsonClearTest, PathNotFoundInObject) {
+    set_initial_json({{"a", 1}});
+    json result = script_manager_.execute_script("json_clear", {test_key_}, {"b"});
+    ASSERT_TRUE(result.is_number_integer());
+    EXPECT_EQ(result.get<long long>(), 0);
+    EXPECT_EQ(get_current_json()["a"], 1); // Original doc unchanged
+}
+
+TEST_F(LuaScriptManagerJsonClearTest, KeyNotFoundRootPath) {
+    // test_key_ is deleted in SetUp
+    json result = script_manager_.execute_script("json_clear", {test_key_}, {"$"});
+    ASSERT_TRUE(result.is_number_integer());
+    EXPECT_EQ(result.get<long long>(), 0);
+}
+
+TEST_F(LuaScriptManagerJsonClearTest, KeyNotFoundNonRootPath) {
+    // test_key_ is deleted in SetUp
+    EXPECT_THROW({
+        try {
+            script_manager_.execute_script("json_clear", {test_key_}, {"some.path"});
+        } catch (const LuaScriptException& e) {
+            EXPECT_THAT(e.what(), ::testing::HasSubstr("ERR document not found"));
+            throw;
+        }
+    }, LuaScriptException);
+}
+
+TEST_F(LuaScriptManagerJsonClearTest, MalformedJsonDocument) {
+    auto conn = conn_manager_.get_connection();
+    redisReply* reply_set = conn->command("SET %s %s", test_key_.c_str(), "this is not json {");
+    ASSERT_NE(reply_set, nullptr); freeReplyObject(reply_set);
+
+    EXPECT_THROW({
+        script_manager_.execute_script("json_clear", {test_key_}, {"$"});
+    }, LuaScriptException); // Just check that it throws, message can vary.
+}
+
+TEST_F(LuaScriptManagerJsonClearTest, InvalidPathSyntax) {
+    set_initial_json({{"a",1}});
+    EXPECT_THROW({
+        try {
+            script_manager_.execute_script("json_clear", {test_key_}, {"a..b"});
+        } catch (const LuaScriptException& e) {
+            EXPECT_THAT(e.what(), ::testing::HasSubstr("ERR_PATH"));
+            throw;
+        }
+    }, LuaScriptException);
+}
+
+TEST_F(LuaScriptManagerJsonClearTest, ClearObjectWithOnlyNonClearableFields) {
+    json initial_doc = {
+        {"name", "stringval"},
+        {"active", false},
+        {"nothing", nullptr}
+    };
+    set_initial_json(initial_doc);
+    json result = script_manager_.execute_script("json_clear", {test_key_}, {"$"});
+    ASSERT_TRUE(result.is_number_integer());
+    EXPECT_EQ(result.get<long long>(), 0); // No numbers to set to 0, no arrays to empty
+    EXPECT_EQ(get_current_json(), initial_doc); // Document should be unchanged
+}
+
+TEST_F(LuaScriptManagerJsonClearTest, ClearObjectWithEmptyNestedArrayAndObject) {
+    json initial_doc = {
+        {"num", 10},
+        {"empty_arr_val", json::array()},
+        {"empty_obj_val", json::object()}
+    };
+    set_initial_json(initial_doc);
+    json result = script_manager_.execute_script("json_clear", {test_key_}, {"$"});
+    ASSERT_TRUE(result.is_number_integer());
+    // num: 10->0 (1)
+    // empty_arr_val: []->[] (0, as it was already empty)
+    // empty_obj_val: {}->{} (0, as it was already empty and no numbers)
+    // Total expected: 1
+    EXPECT_EQ(result.get<long long>(), 1);
+
+    json expected_doc = {
+        {"num", 0},
+        {"empty_arr_val", json::array()},
+        {"empty_obj_val", json::object()}
+    };
+    EXPECT_EQ(get_current_json(), expected_doc);
+}
