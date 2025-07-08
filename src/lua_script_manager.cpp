@@ -850,6 +850,153 @@ end
 return key_count
 )lua";
 
+const std::string LuaScriptManager::JSON_ARRAY_INSERT_LUA = LUA_COMMON_HELPERS + R"lua(
+    local key = KEYS[1]
+    local path_str = ARGV[1]
+    local index_str = ARGV[2]
+    -- ARGV[3] onwards are the values to insert
+
+    if #ARGV < 3 then
+        return redis.error_reply('ERR_ARG_COUNT Not enough arguments for JSON.ARRINSERT')
+    end
+
+    local current_json_str = redis.call('GET', key)
+    if not current_json_str then
+        return redis.error_reply('ERR_NOKEY Key ' .. key .. ' does not exist')
+    end
+
+    local doc, err_decode = cjson.decode(current_json_str)
+    if not doc then
+        return redis.error_reply('ERR_DECODE Failed to decode JSON for key ' .. key .. ': ' .. (err_decode or 'unknown error'))
+    end
+
+    local target_array_ref = doc
+    if path_str ~= '$' and path_str ~= '' then
+        local path_segments = parse_path(path_str)
+        if path_segments == nil or (type(path_segments) == 'table' and path_segments.err) then
+             return redis.error_reply('ERR_PATH Invalid path string: ' .. path_str .. (path_segments.err or ''))
+        end
+        if #path_segments > 0 then
+            target_array_ref = get_value_at_path(doc, path_segments)
+        end
+    end
+
+    if target_array_ref == nil then
+        return redis.error_reply('ERR_NOPATH Path ' .. path_str .. ' does not exist or is null')
+    end
+
+    if type(target_array_ref) ~= 'table' then
+        return redis.error_reply('ERR_NOT_ARRAY Path ' .. path_str .. ' does not point to an array (type: ' .. type(target_array_ref) .. ')')
+    end
+
+    -- Validate if it's actually array-like (all numeric keys 1..N)
+    local is_potential_array = true
+    local n_elements = 0
+    for k, _ in pairs(target_array_ref) do
+        if type(k) ~= 'number' then is_potential_array = false; break; end
+        n_elements = n_elements + 1
+    end
+    if is_potential_array and #target_array_ref ~= n_elements and n_elements > 0 then
+        -- It has numeric keys but might be sparse, or #target_array_ref is 0 for table like {["1"]=val}
+        -- A stricter check might be needed, but for cjson decoded arrays, #target_array_ref should be reliable.
+        -- If it has non-sequential numeric keys, table.insert might behave unexpectedly or create sparse array.
+        -- For simplicity, we rely on #target_array_ref for length of dense arrays.
+        -- If cjson can decode {"0":"a", "1":"b"} into a Lua table where # gives 0, this check needs refinement.
+        -- Standard cjson behavior for JSON arrays `["a","b"]` is Lua table `{ "a", "b" }` where # is 2.
+    end
+    -- No, the above check is not perfect. A simple `type(target_array_ref) == 'table'` is used by other array ops.
+    -- Let's assume if path leads to a JSON object, it's an error. If it leads to JSON array, it's a Lua table.
+    -- We need a better way to distinguish Lua table-as-object from table-as-array.
+    -- For now, rely on `get_value_at_path` returning a table and proceed.
+    -- RedisJSON's error for non-array: "ERR element at path is not an array"
+
+    local insert_idx = tonumber(index_str)
+    if insert_idx == nil then
+        return redis.error_reply('ERR_INDEX Invalid index: ' .. index_str .. ' is not a number')
+    end
+
+    local arr_len = #target_array_ref
+
+    -- Convert 0-based (client) or negative index to 1-based Lua index
+    if insert_idx == 0 then -- Insert at the beginning
+        insert_idx = 1
+    elseif insert_idx > 0 then -- Positive index
+        insert_idx = insert_idx + 1 -- Convert 0-based client to 1-based Lua for position *after* which to insert
+                                    -- No, table.insert(list, pos, val) inserts AT pos, shifting others.
+                                    -- So, 0-based client index 'i' becomes 1-based Lua index 'i+1'.
+        if insert_idx > arr_len + 1 then -- If index is out of bounds (too large)
+            insert_idx = arr_len + 1 -- Append to the end
+        end
+    else -- Negative index (insert_idx < 0)
+        -- -1 means insert before the last element (i.e. at current len)
+        -- -2 means insert before the second to last (i.e. at current len - 1)
+        -- So, effective_idx = arr_len + insert_idx + 1 (in 1-based)
+        insert_idx = arr_len + insert_idx + 1
+        if insert_idx < 1 then -- If index is too small (e.g., -ve larger than arr_len)
+            insert_idx = 1 -- Insert at the beginning
+        end
+    end
+
+    -- If after adjustments, index is still problematic (e.g. target_array_ref was empty, arr_len=0)
+    -- For an empty array, arr_len = 0.
+    -- If insert_idx (client) = 0, Lua idx = 1. Correct.
+    -- If insert_idx (client) = -1, Lua idx = 0 + (-1) + 1 = 0. This should become 1.
+    -- Let's refine negative and boundary conditions for Lua's table.insert:
+    -- Lua's table.insert(t, pos, val) inserts val at position pos.
+    -- If pos > #t + 1, it's an error by default Lua, but RedisJSON appends.
+    -- If pos < 1, it's an error. RedisJSON prepends.
+
+    if arr_len == 0 then -- Target array is empty
+        insert_idx = 1 -- Always insert at the beginning for an empty array
+    else
+        if index_str == "0" then -- Original client index was 0
+            insert_idx = 1
+        else
+            local client_idx = tonumber(index_str) -- Re-parse for clarity
+            if client_idx > 0 then
+                insert_idx = client_idx + 1
+                if insert_idx > arr_len + 1 then insert_idx = arr_len + 1 end
+            elseif client_idx < 0 then
+                insert_idx = arr_len + client_idx + 1
+                if insert_idx < 1 then insert_idx = 1 end
+            else -- client_idx == 0 was handled by index_str == "0"
+                 -- This path should not be taken if index_str is a valid number != 0
+            end
+        end
+    end
+
+
+    local values_to_insert = {}
+    for i = 3, #ARGV do
+        local val_json_str = ARGV[i]
+        local val, err_val = cjson.decode(val_json_str)
+        if not val and val_json_str ~= 'null' then
+            return redis.error_reply('ERR_DECODE_ARG Failed to decode value argument #' .. (i-2) .. ': ' .. (err_val or 'unknown error'))
+        end
+        table.insert(values_to_insert, val)
+    end
+
+    if #values_to_insert == 0 then
+        return redis.error_reply('ERR_NO_VALUES No values provided for insertion')
+    end
+
+    -- Insert values one by one. Each subsequent insert will be at an incremented index
+    -- due to previous insertions shifting elements.
+    for i, value_to_insert in ipairs(values_to_insert) do
+        table.insert(target_array_ref, insert_idx, value_to_insert)
+        insert_idx = insert_idx + 1 -- Next value goes after the one just inserted
+    end
+
+    local new_doc_json_str, err_encode = cjson.encode(doc)
+    if not new_doc_json_str then
+        return redis.error_reply('ERR_ENCODE Failed to encode document after array insert: ' .. (err_encode or 'unknown error'))
+    end
+
+    redis.call('SET', key, new_doc_json_str)
+
+    return #target_array_ref -- Return the new length of the array
+)lua";
+
 LuaScriptManager::LuaScriptManager(RedisConnectionManager* conn_manager)
     : connection_manager_(conn_manager) {
     if (!conn_manager) {
@@ -946,9 +1093,10 @@ const std::map<std::string, const std::string*> LuaScriptManager::SCRIPT_DEFINIT
     {"json_compare_set", &LuaScriptManager::ATOMIC_JSON_COMPARE_SET_PATH_LUA}, // Renamed from atomic_json_compare_set_path
     {"json_sparse_merge", &LuaScriptManager::JSON_SPARSE_MERGE_LUA},
     {"json_object_keys", &LuaScriptManager::JSON_OBJECT_KEYS_LUA},
-    // Add any other scripts here if they are defined as static const std::string members
     {"json_numincrby", &LuaScriptManager::JSON_NUMINCRBY_LUA},
-    {"json_object_length", &LuaScriptManager::JSON_OBJECT_LENGTH_LUA}
+    {"json_object_length", &LuaScriptManager::JSON_OBJECT_LENGTH_LUA},
+    {"json_array_insert", &LuaScriptManager::JSON_ARRAY_INSERT_LUA}
+    // Add any other scripts here if they are defined as static const std::string members
 };
 
 const std::string* LuaScriptManager::get_script_body_by_name(const std::string& name) const {

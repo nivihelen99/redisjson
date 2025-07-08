@@ -117,6 +117,220 @@ TEST_F(LuaScriptManagerTest, ExecuteLoadedScript) {
     EXPECT_EQ(result_json.get<std::string>(), "Hello Lua!");
 }
 
+// --- Tests for JSON_ARRAY_INSERT_LUA ---
+class LuaScriptManagerArrInsertTest : public LuaScriptManagerTest {
+protected:
+    std::string test_key_ = "luatest:arrinsert";
+
+    void SetUp() override {
+        LuaScriptManagerTest::SetUp();
+        if (live_redis_available_) {
+            try {
+                script_manager_.preload_builtin_scripts();
+                ASSERT_TRUE(script_manager_.is_script_loaded("json_array_insert"));
+                auto conn = conn_manager_.get_connection();
+                redisReply* reply = conn->command("DEL %s", test_key_.c_str());
+                if (reply) freeReplyObject(reply);
+            } catch (const std::exception& e) {
+                GTEST_SKIP() << "Skipping ArrInsert tests, setup failed: " << e.what();
+            }
+        } else {
+            GTEST_SKIP() << "Skipping ArrInsert tests, live Redis required.";
+        }
+    }
+
+    void TearDown() override {
+        if (live_redis_available_) {
+            try {
+                auto conn = conn_manager_.get_connection();
+                redisReply* reply = conn->command("DEL %s", test_key_.c_str());
+                if (reply) freeReplyObject(reply);
+            } catch (...) { /* ignore cleanup errors */ }
+        }
+        LuaScriptManagerTest::TearDown();
+    }
+
+    void set_initial_json(const json& doc) {
+        auto conn = conn_manager_.get_connection();
+        std::string doc_str = doc.dump();
+        redisReply* reply = conn->command("SET %s %s", test_key_.c_str(), doc_str.c_str());
+        ASSERT_NE(reply, nullptr);
+        ASSERT_EQ(reply->type, REDIS_REPLY_STATUS) << "SET command failed: " << (reply->str ? reply->str : "Unknown error");
+        ASSERT_STREQ(reply->str, "OK");
+        freeReplyObject(reply);
+    }
+
+    json get_current_json() {
+        auto conn = conn_manager_.get_connection();
+        RedisReplyPtr reply(static_cast<redisReply*>(conn->command("GET %s", test_key_.c_str())));
+        if (!reply || reply->type != REDIS_REPLY_STRING) {
+            return json(nullptr);
+        }
+        return json::parse(reply->str);
+    }
+};
+
+TEST_F(LuaScriptManagerArrInsertTest, InsertSingleValueMiddle) {
+    set_initial_json(json::array({"a", "c"}));
+    json result = script_manager_.execute_script("json_array_insert", {test_key_}, {"$", "1", R"("b")"});
+    ASSERT_TRUE(result.is_number_integer());
+    EXPECT_EQ(result.get<long long>(), 3);
+    EXPECT_EQ(get_current_json(), json::array({"a", "b", "c"}));
+}
+
+TEST_F(LuaScriptManagerArrInsertTest, InsertMultipleValuesMiddle) {
+    set_initial_json(json::array({"a", "d"}));
+    json result = script_manager_.execute_script("json_array_insert", {test_key_}, {"$", "1", R"("b")", R"("c")"});
+    ASSERT_TRUE(result.is_number_integer());
+    EXPECT_EQ(result.get<long long>(), 4);
+    EXPECT_EQ(get_current_json(), json::array({"a", "b", "c", "d"}));
+}
+
+TEST_F(LuaScriptManagerArrInsertTest, InsertAtBeginningIndexZero) {
+    set_initial_json(json::array({"b", "c"}));
+    json result = script_manager_.execute_script("json_array_insert", {test_key_}, {"$", "0", R"("a")"});
+    ASSERT_TRUE(result.is_number_integer());
+    EXPECT_EQ(result.get<long long>(), 3);
+    EXPECT_EQ(get_current_json(), json::array({"a", "b", "c"}));
+}
+
+TEST_F(LuaScriptManagerArrInsertTest, InsertAtEndPositiveIndexLarge) {
+    set_initial_json(json::array({"a", "b"}));
+    json result = script_manager_.execute_script("json_array_insert", {test_key_}, {"$", "100", R"("c")"}); // Index 100 -> effective end
+    ASSERT_TRUE(result.is_number_integer());
+    EXPECT_EQ(result.get<long long>(), 3);
+    EXPECT_EQ(get_current_json(), json::array({"a", "b", "c"}));
+}
+
+TEST_F(LuaScriptManagerArrInsertTest, InsertAtEndSpecificIndex) {
+    set_initial_json(json::array({"a", "b"}));
+    // Client index 2 means after current last element (0-indexed 'b' at 1), so at Lua 1-based index 3.
+    json result = script_manager_.execute_script("json_array_insert", {test_key_}, {"$", "2", R"("c")"});
+    ASSERT_TRUE(result.is_number_integer());
+    EXPECT_EQ(result.get<long long>(), 3);
+    EXPECT_EQ(get_current_json(), json::array({"a", "b", "c"}));
+}
+
+
+TEST_F(LuaScriptManagerArrInsertTest, InsertNegativeIndexBeforeLast) {
+    set_initial_json(json::array({"a", "c"}));
+    json result = script_manager_.execute_script("json_array_insert", {test_key_}, {"$", "-1", R"("b")"}); // -1 inserts before 'c'
+    ASSERT_TRUE(result.is_number_integer());
+    EXPECT_EQ(result.get<long long>(), 3);
+    EXPECT_EQ(get_current_json(), json::array({"a", "b", "c"}));
+}
+
+TEST_F(LuaScriptManagerArrInsertTest, InsertNegativeIndexAtBeginning) {
+    set_initial_json(json::array({"b", "c"}));
+    json result = script_manager_.execute_script("json_array_insert", {test_key_}, {"$", "-100", R"("a")"}); // Large negative index -> beginning
+    ASSERT_TRUE(result.is_number_integer());
+    EXPECT_EQ(result.get<long long>(), 3);
+    EXPECT_EQ(get_current_json(), json::array({"a", "b", "c"}));
+}
+
+
+TEST_F(LuaScriptManagerArrInsertTest, InsertIntoEmptyArray) {
+    set_initial_json(json::array());
+    json result = script_manager_.execute_script("json_array_insert", {test_key_}, {"$", "0", R"("a")"});
+    ASSERT_TRUE(result.is_number_integer());
+    EXPECT_EQ(result.get<long long>(), 1);
+    EXPECT_EQ(get_current_json(), json::array({"a"}));
+
+    set_initial_json(json::array()); // Reset
+    result = script_manager_.execute_script("json_array_insert", {test_key_}, {"$", "5", R"("b")"}); // Index > 0 on empty
+    ASSERT_TRUE(result.is_number_integer());
+    EXPECT_EQ(result.get<long long>(), 1);
+    EXPECT_EQ(get_current_json(), json::array({"b"}));
+
+    set_initial_json(json::array()); // Reset
+    result = script_manager_.execute_script("json_array_insert", {test_key_}, {"$", "-5", R"("c")"}); // Index < 0 on empty
+    ASSERT_TRUE(result.is_number_integer());
+    EXPECT_EQ(result.get<long long>(), 1);
+    EXPECT_EQ(get_current_json(), json::array({"c"}));
+}
+
+TEST_F(LuaScriptManagerArrInsertTest, InsertIntoNestedArray) {
+    json doc = {{"data", {{"list", {"x", "z"}}}}};
+    set_initial_json(doc);
+    json result = script_manager_.execute_script("json_array_insert", {test_key_}, {"data.list", "1", R"("y")"});
+    ASSERT_TRUE(result.is_number_integer());
+    EXPECT_EQ(result.get<long long>(), 3);
+    json expected_doc = {{"data", {{"list", {"x", "y", "z"}}}}};
+    EXPECT_EQ(get_current_json(), expected_doc);
+}
+
+TEST_F(LuaScriptManagerArrInsertTest, ErrorKeyNotFound) {
+    EXPECT_THROW({
+        try {
+            script_manager_.execute_script("json_array_insert", {"nonexistentkey"}, {"$", "0", R"("a")"});
+        } catch (const LuaScriptException& e) {
+            EXPECT_THAT(e.what(), ::testing::HasSubstr("ERR_NOKEY"));
+            throw;
+        }
+    }, LuaScriptException);
+}
+
+TEST_F(LuaScriptManagerArrInsertTest, ErrorPathNotFound) {
+    set_initial_json({{"some", "object"}});
+    EXPECT_THROW({
+        try {
+            script_manager_.execute_script("json_array_insert", {test_key_}, {"data.list", "0", R"("a")"});
+        } catch (const LuaScriptException& e) {
+            EXPECT_THAT(e.what(), ::testing::HasSubstr("ERR_NOPATH"));
+            throw;
+        }
+    }, LuaScriptException);
+}
+
+TEST_F(LuaScriptManagerArrInsertTest, ErrorNotAnArray) {
+    set_initial_json({{"data", "not an array"}});
+    EXPECT_THROW({
+        try {
+            script_manager_.execute_script("json_array_insert", {test_key_}, {"data", "0", R"("a")"});
+        } catch (const LuaScriptException& e) {
+            EXPECT_THAT(e.what(), ::testing::HasSubstr("ERR_NOT_ARRAY"));
+            throw;
+        }
+    }, LuaScriptException);
+}
+
+TEST_F(LuaScriptManagerArrInsertTest, ErrorInvalidIndexString) {
+    set_initial_json(json::array({"a"}));
+    EXPECT_THROW({
+        try {
+            script_manager_.execute_script("json_array_insert", {test_key_}, {"$", "notanumber", R"("b")"});
+        } catch (const LuaScriptException& e) {
+            EXPECT_THAT(e.what(), ::testing::HasSubstr("ERR_INDEX"));
+            throw;
+        }
+    }, LuaScriptException);
+}
+
+TEST_F(LuaScriptManagerArrInsertTest, ErrorNotEnoughArguments) {
+    set_initial_json(json::array({"a"}));
+    EXPECT_THROW({
+        try {
+            script_manager_.execute_script("json_array_insert", {test_key_}, {"$", "0"}); // Missing value
+        } catch (const LuaScriptException& e) {
+            EXPECT_THAT(e.what(), ::testing::HasSubstr("ERR_ARG_COUNT"));
+            throw;
+        }
+    }, LuaScriptException);
+}
+
+TEST_F(LuaScriptManagerArrInsertTest, ErrorValueNotJson) {
+    set_initial_json(json::array({"a"}));
+    EXPECT_THROW({
+        try {
+            // Pass a string that is not valid JSON for the value
+            script_manager_.execute_script("json_array_insert", {test_key_}, {"$", "0", "this is not json"});
+        } catch (const LuaScriptException& e) {
+            EXPECT_THAT(e.what(), ::testing::HasSubstr("ERR_DECODE_ARG"));
+            throw;
+        }
+    }, LuaScriptException);
+}
+
 
 // --- Tests for JSON_OBJECT_LENGTH_LUA ---
 class LuaScriptManagerObjLenTest : public LuaScriptManagerTest {

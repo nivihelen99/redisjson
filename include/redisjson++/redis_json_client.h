@@ -147,6 +147,8 @@ public:
     json pop_path(const std::string& key, const std::string& path,
                   int index = -1);
     size_t array_length(const std::string& key, const std::string& path) const;
+    long long arrinsert(const std::string& key, const std::string& path, int index, const std::vector<json>& values);
+
 
     // Merge Operations (client-side or specific command needed)
     void merge_json(const std::string& key, const json& patch); // Simplified: deep merge by default client-side
