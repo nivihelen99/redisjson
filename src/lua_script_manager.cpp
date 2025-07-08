@@ -1171,29 +1171,37 @@ if type(target_array_ref) ~= 'table' then
     return redis.error_reply('ERR_NOT_ARRAY Path ' .. path_str .. ' does not point to an array (type: ' .. type(target_array_ref) .. ')')
 end
 
--- Validate if it's actually array-like.
--- cjson decodes JSON arrays to Lua tables with sequential integer keys 1..N.
--- A simple check: iterate keys, if any non-numeric or non-sequential, it's not a dense array.
-local is_dense_array = true
-local array_len = 0
-if next(target_array_ref) == nil then -- Empty table is an empty array
-    array_len = 0
+-- Stricter validation to ensure it's an array, not an object that happens to be a Lua table.
+local is_actual_array = true
+local count = 0
+local max_idx = 0
+if next(target_array_ref) == nil then -- Empty table is considered an empty array
+    is_actual_array = true
 else
-    local temp_len = 0
-    for k, _ in pairs(target_array_ref) do
-        temp_len = temp_len + 1
-        if type(k) ~= 'number' or k < 1 or k > temp_len then -- Check for non-numeric or non-sequential keys
-            -- This check is basic. #target_array_ref is more reliable for cjson decoded arrays.
+    for k, v in pairs(target_array_ref) do
+        count = count + 1
+        if type(k) ~= 'number' then
+            is_actual_array = false
+            break
         end
+        if k > max_idx then max_idx = k end
     end
-    array_len = #target_array_ref -- Use Lua's length operator for sequence part.
-    if array_len ~= temp_len and temp_len > 0 then -- If #target_array_ref doesn't match total elements, it might be sparse or object-like.
-        -- However, for cjson output of a JSON array, #target_array_ref should be correct.
-        -- If it's an object that happens to have numeric keys, this check might be tricky.
-        -- Let's rely on #target_array_ref for length and type check above.
-        -- For this emulation, we assume target_array_ref is a proper Lua sequence if it's a JSON array.
+    if is_actual_array and count > 0 and max_idx ~= count then -- Check for sparse array, e.g. {1='a', 3='c'}
+        is_actual_array = false
+    end
+    -- If all keys were numbers but not sequential from 1 up to count, it's not a dense JSON array.
+    -- The #operator in Lua gives the length of the sequence part.
+    -- If #target_array_ref is not equal to the total number of numeric keys and it's not empty, it's not a dense array.
+    if is_actual_array and count > 0 and #target_array_ref ~= count then
+         is_actual_array = false
     end
 end
+
+if not is_actual_array then
+    return redis.error_reply('ERR_NOT_ARRAY Path ' .. path_str .. ' points to an object, not an array.')
+end
+
+local array_len = #target_array_ref
 
 
 -- Decode the value to search for
