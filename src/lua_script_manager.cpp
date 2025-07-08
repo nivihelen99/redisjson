@@ -1193,8 +1193,8 @@ local function do_clear_recursive(target_value, is_target_array_hint)
                 if sub_cleared_count > 0 then count = count + sub_cleared_count; end
                 if sub_modified then item_modified_this_iteration = true; end
 
-                if sub_is_array_hint and #v == 0 and sub_modified then
-                    -- Using setmetatable to ensure cjson encodes it as []
+                -- If v is an array and is empty (either became empty or started empty), ensure metatable.
+                if sub_is_array_hint and #v == 0 then
                     setmetatable(v, { __array = true })
                 end
             end
@@ -1202,6 +1202,12 @@ local function do_clear_recursive(target_value, is_target_array_hint)
                 actually_modified_structure = true;
             end
         end
+    end
+    -- For arrays handled at the current level of recursion:
+    -- If it's an array and it's empty, ensure it has the __array metatable.
+    -- This covers arrays that were emptied OR were already empty.
+    if is_array and #target_value == 0 then
+        setmetatable(target_value, { __array = true })
     end
     return count, actually_modified_structure
 end
@@ -1234,27 +1240,25 @@ if path_str == '$' or path_str == '' then
             if root_is_array==nil then root_is_array=true; end
         end
         cleared_count, doc_modified_overall = do_clear_recursive(current_doc, root_is_array)
-        if root_is_array and (type(current_doc)=='table' and #current_doc == 0) and doc_modified_overall then
-             -- Ensure root empty array is encoded as [] by cjson
+        -- If the root was an array and is now empty (or started empty and was processed), ensure metatable.
+        if root_is_array and (type(current_doc)=='table' and #current_doc == 0) then
              setmetatable(current_doc, { __array = true })
         end
     else
          cleared_count = 0; doc_modified_overall = false;
     end
 else -- Path is not root
-    -- This is the part that was missing / replaced by C++ code in the problematic version
     local path_segments = parse_path(path_str)
     if path_segments == nil or (type(path_segments) == 'table' and path_segments.err) then
         return redis.error_reply('ERR_PATH Invalid path string for CLEAR: ' .. path_str .. (path_segments.err or ''))
     end
-    if #path_segments == 0 then -- Path resolved to root, should be handled by above block
-        -- This case should ideally not be hit if parse_path handles '$' correctly to return empty segments
-        -- and the root path logic is comprehensive.
-        -- Re-evaluate root if necessary (defensive)
+    if #path_segments == 0 then 
+        -- Path resolved to root (e.g. if parse_path can return empty for root-like variants)
+        -- Fallback to root processing logic.
         if type(current_doc) == 'table' then
-            local root_is_array2 = nil; local n_root_keys2=0; if next(current_doc)==nil then root_is_array2=true; else for kr,_ in pairs(current_doc) do n_root_keys2=n_root_keys2+1; if type(kr)~='number' or kr<1 or kr>n_root_keys2 then root_is_array2=false; break; end end; if root_is_array2==nil and #current_doc~=n_root_keys2 then root_is_array2=false; end; if root_is_array2==nil then root_is_array2=true; end end
-            cleared_count, doc_modified_overall = do_clear_recursive(current_doc, root_is_array2)
-            if root_is_array2 and #current_doc == 0 and doc_modified_overall then setmetatable(current_doc, { __array = true }); end
+            local root_is_array_alt = nil; local n_root_keys_alt=0; if next(current_doc)==nil then root_is_array_alt=true; else for kr,_ in pairs(current_doc) do n_root_keys_alt=n_root_keys_alt+1; if type(kr)~='number' or kr<1 or kr>n_root_keys_alt then root_is_array_alt=false; break; end end; if root_is_array_alt==nil and #current_doc~=n_root_keys_alt then root_is_array_alt=false; end; if root_is_array_alt==nil then root_is_array_alt=true; end end
+            cleared_count, doc_modified_overall = do_clear_recursive(current_doc, root_is_array_alt)
+            if root_is_array_alt and #current_doc == 0 then setmetatable(current_doc, { __array = true }); end
         else cleared_count = 0; doc_modified_overall = false; end
     else
         -- Path is not root, and path_segments is not empty
@@ -1275,10 +1279,9 @@ else -- Path is not root
         if type(target_value) == 'table' then
             local target_is_array = nil; local n_target_keys=0; if next(target_value)==nil then target_is_array=true; else for kt,_ in pairs(target_value) do n_target_keys=n_target_keys+1; if type(kt)~='number' or kt<1 or kt>n_target_keys then target_is_array=false; break; end end; if target_is_array==nil and #target_value~=n_target_keys then target_is_array=false; end; if target_is_array==nil then target_is_array=true; end end
             cleared_count, doc_modified_overall = do_clear_recursive(target_value, target_is_array)
-            if target_is_array and #target_value == 0 and doc_modified_overall then
-                -- If the cleared target was an array and is now empty, ensure it's correctly represented
-                -- parent[final_segment] = empty_array() -- Reassign to parent
-                setmetatable(target_value, {__array = true}) -- Modify in place, parent already has ref
+            -- If the cleared target was an array and is now empty (or started empty), ensure metatable.
+            if target_is_array and #target_value == 0 then
+                setmetatable(target_value, {__array = true}) 
             end
         elseif type(target_value) == 'number' then
             parent[final_segment] = 0
