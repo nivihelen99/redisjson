@@ -916,6 +916,147 @@ void run_jsonclear_operations(redisjson::RedisJSONClient& client) {
     client.del_json(clear_key);
 }
 
+void run_arrindex_operations(redisjson::RedisJSONClient& client) {
+    print_header("Array Index Operations (JSON.ARRINDEX)");
+    std::string key = "sample:arrindex:data";
+
+    // Preparatory cleanup
+    try { client.del_json(key); } catch(...) {}
+
+    json doc = {
+        {"items", {"apple", "banana", 123, true, "cherry", "banana", nullptr, 45.6}}
+    };
+    client.set_json(key, doc);
+    std::cout << "Initial document: " << client.get_json(key).dump() << std::endl;
+
+    long long index_result;
+
+    // 1. Find string "banana"
+    index_result = client.arrindex(key, "items", json("banana"));
+    std::cout << "Index of 'banana': " << index_result << " (Expected: 1)" << std::endl;
+    if (index_result != 1) std::cerr << "VERIFICATION FAILED for 'banana'" << std::endl;
+
+    // 2. Find number 123
+    index_result = client.arrindex(key, "items", json(123));
+    std::cout << "Index of 123: " << index_result << " (Expected: 2)" << std::endl;
+    if (index_result != 2) std::cerr << "VERIFICATION FAILED for 123" << std::endl;
+
+    // 3. Find boolean true
+    index_result = client.arrindex(key, "items", json(true));
+    std::cout << "Index of true: " << index_result << " (Expected: 3)" << std::endl;
+    if (index_result != 3) std::cerr << "VERIFICATION FAILED for true" << std::endl;
+
+    // 4. Find null
+    index_result = client.arrindex(key, "items", json(nullptr));
+    std::cout << "Index of null: " << index_result << " (Expected: 6)" << std::endl;
+    if (index_result != 6) std::cerr << "VERIFICATION FAILED for null" << std::endl;
+
+    // 5. Find string "banana" starting from index 2
+    index_result = client.arrindex(key, "items", json("banana"), 2);
+    std::cout << "Index of 'banana' from index 2: " << index_result << " (Expected: 5)" << std::endl;
+    if (index_result != 5) std::cerr << "VERIFICATION FAILED for 'banana' from index 2" << std::endl;
+
+    // 6. Find string "banana" in slice [0, 3] (exclusive end for typical slice, but RedisJSON is inclusive for end)
+    // Lua script handles end_index as inclusive.
+    index_result = client.arrindex(key, "items", json("banana"), 0, 3);
+    std::cout << "Index of 'banana' in slice [0, 3]: " << index_result << " (Expected: 1)" << std::endl;
+    if (index_result != 1) std::cerr << "VERIFICATION FAILED for 'banana' in slice [0,3]" << std::endl;
+
+    // 7. Find string "banana" in slice [2, 4]
+    index_result = client.arrindex(key, "items", json("banana"), 2, 4);
+    std::cout << "Index of 'banana' in slice [2, 4]: " << index_result << " (Expected: -1, as 'banana' at 5 is outside)" << std::endl;
+    if (index_result != -1) std::cerr << "VERIFICATION FAILED for 'banana' in slice [2,4]" << std::endl;
+
+
+    // 8. Value not found
+    index_result = client.arrindex(key, "items", json("grape"));
+    std::cout << "Index of 'grape': " << index_result << " (Expected: -1)" << std::endl;
+    if (index_result != -1) std::cerr << "VERIFICATION FAILED for 'grape'" << std::endl;
+
+    // 9. Using negative start index: find "banana" from 3rd last element onwards (-3)
+    // Array: {"apple", "banana", 123, true, "cherry", "banana", nullptr, 45.6} (len 8)
+    // -1 is 45.6 (idx 7)
+    // -2 is null (idx 6)
+    // -3 is "banana" (idx 5)
+    index_result = client.arrindex(key, "items", json("banana"), -3);
+    std::cout << "Index of 'banana' from -3 (3rd last): " << index_result << " (Expected: 5)" << std::endl;
+    if (index_result != 5) std::cerr << "VERIFICATION FAILED for 'banana' from -3" << std::endl;
+
+    // 10. Using negative start and end: find "banana" from 4th last (-4) to 2nd last (-2)
+    // -4 is "cherry" (idx 4)
+    // -2 is null (idx 6)
+    // Slice is ["cherry", "banana", nullptr]
+    index_result = client.arrindex(key, "items", json("banana"), -4, -2);
+    std::cout << "Index of 'banana' in slice [-4, -2]: " << index_result << " (Expected: 5)" << std::endl;
+    if (index_result != 5) std::cerr << "VERIFICATION FAILED for 'banana' in slice [-4,-2]" << std::endl;
+
+    // 11. Start index out of bounds (positive)
+    index_result = client.arrindex(key, "items", json("apple"), 100);
+    std::cout << "Index of 'apple' with start_index 100: " << index_result << " (Expected: -1)" << std::endl;
+    if (index_result != -1) std::cerr << "VERIFICATION FAILED for start_index 100" << std::endl;
+
+    // 12. End index out of bounds (negative, before start)
+    index_result = client.arrindex(key, "items", json("apple"), 0, -100);
+    std::cout << "Index of 'apple' with end_index -100: " << index_result << " (Expected: -1)" << std::endl;
+    if (index_result != -1) std::cerr << "VERIFICATION FAILED for end_index -100" << std::endl;
+
+    // 13. Empty array
+    client.set_json(key, {{"items", json::array()}});
+    std::cout << "Document for empty array test: " << client.get_json(key).dump() << std::endl;
+    index_result = client.arrindex(key, "items", json("anything"));
+    std::cout << "Index of 'anything' in empty array: " << index_result << " (Expected: -1)" << std::endl;
+    if (index_result != -1) std::cerr << "VERIFICATION FAILED for empty array" << std::endl;
+
+    // Error cases
+    // 14. Path not an array
+    client.set_json(key, {{"items", "not_an_array"}});
+    std::cout << "\nTesting path not an array:" << std::endl;
+    try {
+        client.arrindex(key, "items", json("value"));
+        std::cerr << "ERROR: Did not throw for non-array path." << std::endl;
+    } catch (const redisjson::TypeMismatchException& e) { // SWSS mode
+        std::cout << "SUCCESS (SWSS): Caught TypeMismatchException: " << e.what() << std::endl;
+    } catch (const redisjson::LuaScriptException& e) { // Lua mode
+        std::cout << "SUCCESS (Lua): Caught LuaScriptException: " << e.what() << std::endl;
+        if (std::string(e.what()).find("ERR_NOT_ARRAY") == std::string::npos)
+            std::cerr << "VERIFICATION FAILED: Lua error message incorrect for non-array." << std::endl;
+    }
+
+    // 15. Path does not exist
+    client.set_json(key, {{"other_data", 1}});
+    std::cout << "\nTesting path does not exist:" << std::endl;
+    try {
+        client.arrindex(key, "nonexistent.items", json("value"));
+        std::cerr << "ERROR: Did not throw for non-existent path." << std::endl;
+    } catch (const redisjson::PathNotFoundException& e) { // SWSS mode
+        std::cout << "SUCCESS (SWSS): Caught PathNotFoundException: " << e.what() << std::endl;
+    } catch (const redisjson::LuaScriptException& e) { // Lua mode
+        std::cout << "SUCCESS (Lua): Caught LuaScriptException: " << e.what() << std::endl;
+         if (std::string(e.what()).find("ERR_NOPATH") == std::string::npos && std::string(e.what()).find("ERR_PATH") == std::string::npos)
+            std::cerr << "VERIFICATION FAILED: Lua error message incorrect for non-existent path." << std::endl;
+    }
+
+
+    // 16. Key does not exist
+    std::string non_existent_key = "sample:arrindex:no_such_key";
+    try { client.del_json(non_existent_key); } catch(...) {}
+    std::cout << "\nTesting key does not exist:" << std::endl;
+    try {
+        client.arrindex(non_existent_key, "$", json("value")); // Path $ on non-existent key
+        std::cerr << "ERROR: Did not throw for non-existent key." << std::endl;
+    } catch (const redisjson::PathNotFoundException& e) { // SWSS mode (get_json throws this)
+        std::cout << "SUCCESS (SWSS): Caught PathNotFoundException for non-existent key: " << e.what() << std::endl;
+    } catch (const redisjson::LuaScriptException& e) { // Lua mode
+        std::cout << "SUCCESS (Lua): Caught LuaScriptException for non-existent key: " << e.what() << std::endl;
+        if (std::string(e.what()).find("ERR_NOKEY") == std::string::npos)
+            std::cerr << "VERIFICATION FAILED: Lua error message incorrect for non-existent key." << std::endl;
+    }
+
+
+    // Cleanup
+    try { client.del_json(key); } catch(...) {}
+}
+
 
 int main() {
     // --- Non-SWSS Mode / Legacy Mode Example ---
@@ -954,6 +1095,7 @@ int main() {
         run_object_operations(legacy_client);
         run_numeric_operations(legacy_client);
         run_jsonclear_operations(legacy_client); // Added this line
+        run_arrindex_operations(legacy_client); // Added for JSON.ARRINDEX
 
         print_header("Non-SWSS (Legacy) Mode Sample Program Finished");
 

@@ -135,6 +135,26 @@ public:
      */
     long long json_clear(const std::string& key, const std::string& path = "$");
 
+    /**
+     * @brief Searches for the first occurrence of a scalar JSON value within an array.
+     * JSON.ARRINDEX key path json-value [start-index [stop-index]]
+     * @param key The key of the JSON document.
+     * @param path The JSONPath to the array.
+     * @param value_to_find The JSON scalar value to search for.
+     * @param start_index Optional 0-based index to start searching from (inclusive). Defaults to beginning of array. Negative values are calculated from the end.
+     * @param end_index Optional 0-based index to stop searching at (inclusive). Defaults to end of array. Negative values are calculated from the end.
+     * @return The 0-based index of the first occurrence of the value in the array, or -1 if not found.
+     * @throws PathNotFoundException if the key or path does not exist.
+     * @throws TypeMismatchException if the target at path is not an array or value_to_find is not a scalar.
+     * @throws LuaScriptException for errors during script execution.
+     * @throws ConnectionException on connection issues.
+     */
+    long long arrindex(const std::string& key,
+                       const std::string& path,
+                       const json& value_to_find,
+                       std::optional<long long> start_index = std::nullopt,
+                       std::optional<long long> end_index = std::nullopt);
+
     // Path Operations (will be client-side get-modify-set, atomicity lost for SWSS)
     json get_path(const std::string& key, const std::string& path) const;
     void set_path(const std::string& key, const std::string& path,

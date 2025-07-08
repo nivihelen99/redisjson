@@ -1200,6 +1200,98 @@ std::vector<std::string> RedisJSONClient::keys_by_pattern(const std::string& pat
                 throw RedisCommandException("SCAN", "Pattern: " + pattern + ", Unexpected reply structure");
             }
 
+long long RedisJSONClient::arrindex(const std::string& key,
+                                    const std::string& path,
+                                    const json& value_to_find,
+                                    std::optional<long long> start_index,
+                                    std::optional<long long> end_index) {
+    if (_is_swss_mode) {
+        // SWSS mode: client-side GET, parse, search, no atomicity.
+        // This is a simplified client-side emulation.
+        // For full compatibility with RedisJSON's ARRINDEX features (like slices),
+        // this would need more complex logic.
+        json doc = get_json(key); // Throws if key not found
+        json target_array;
+        try {
+            target_array = doc.at(json::json_pointer(PathParser::to_json_pointer(path)));
+        } catch (const json::out_of_range&) {
+            throw PathNotFoundException(key, path, "Path does not exist in document for ARRINDEX.");
+        } catch (const json::type_error&) { // e.g. path leads to non-object parent
+             throw PathNotFoundException(key, path, "Path structure invalid for ARRINDEX.");
+        }
+
+
+        if (!target_array.is_array()) {
+            throw TypeMismatchException(key, path, "array", target_array.type_name(), "Target for ARRINDEX is not an array.");
+        }
+        if (!value_to_find.is_primitive() && !value_to_find.is_null()) {
+            // RedisJSON's ARRINDEX is typically for scalar values.
+            // Supporting object/array search here client-side would require deep comparison.
+             throw TypeMismatchException(key, path, "scalar", value_to_find.type_name(), "Search value for ARRINDEX must be a scalar (string, number, boolean, null).");
+        }
+
+        long long current_start_idx = 0;
+        if (start_index.has_value()) {
+            current_start_idx = start_index.value();
+            if (current_start_idx < 0) {
+                current_start_idx = static_cast<long long>(target_array.size()) + current_start_idx;
+            }
+            if (current_start_idx < 0) current_start_idx = 0; // Clamp
+        }
+
+        long long current_end_idx = static_cast<long long>(target_array.size()) -1;
+        if (end_index.has_value()) {
+            current_end_idx = end_index.value();
+             if (current_end_idx < 0) {
+                current_end_idx = static_cast<long long>(target_array.size()) + current_end_idx;
+            }
+        }
+        // Clamp end_idx to be within array bounds
+        if (current_end_idx >= static_cast<long long>(target_array.size())) {
+            current_end_idx = static_cast<long long>(target_array.size()) -1;
+        }
+
+
+        if (current_start_idx > current_end_idx || target_array.empty()) {
+            return -1; // Invalid range or empty array
+        }
+
+
+        for (long long i = current_start_idx; i <= current_end_idx; ++i) {
+            if (i < 0 || i >= static_cast<long long>(target_array.size())) continue; // Should be caught by clamping but defensive
+
+            if (target_array.at(static_cast<size_t>(i)) == value_to_find) {
+                return i; // Return 0-based index
+            }
+        }
+        return -1; // Not found
+    }
+
+    throwIfNotLegacyWithLua("arrindex");
+    std::string value_json_str = value_to_find.dump();
+    std::string start_str = start_index.has_value() ? std::to_string(start_index.value()) : "";
+    std::string end_str = end_index.has_value() ? std::to_string(end_index.value()) : "";
+
+    json script_result = _lua_script_manager->execute_script(
+        "json_arrindex",
+        {key},
+        {path, value_json_str, start_str, end_str}
+    );
+
+    if (script_result.is_number_integer()) {
+        return script_result.get<long long>();
+    } else if (script_result.is_null()) { // Should return -1 not null for not found by script.
+        // This case indicates an issue with the script or an unexpected nil return.
+        // Based on current script, it should return -1 or an error string.
+        // For robustness, treat unexpected null as "not found" or log a warning.
+        // However, Lua errors are thrown as LuaScriptException by redis_reply_to_json.
+        // So, if we reach here with null, it's likely a script logic path that explicitly returns null
+        // instead of an error or -1. The current script returns -1 for not found.
+        // This path might be less likely with the current script.
+        return -1; // Or throw, depending on strictness.
+    }
+    throw JsonParsingException("JSON.ARRINDEX script did not return an integer. Got: " + script_result.dump());
+}
             redisReply* cursor_reply = reply->element[0];
             cursor = std::string(cursor_reply->str, cursor_reply->len);
 

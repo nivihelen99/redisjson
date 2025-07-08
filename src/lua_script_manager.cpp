@@ -1120,9 +1120,137 @@ const std::map<std::string, const std::string*> LuaScriptManager::SCRIPT_DEFINIT
     {"json_numincrby", &LuaScriptManager::JSON_NUMINCRBY_LUA},
     {"json_object_length", &LuaScriptManager::JSON_OBJECT_LENGTH_LUA},
     {"json_array_insert", &LuaScriptManager::JSON_ARRAY_INSERT_LUA},
-    {"json_clear", &LuaScriptManager::JSON_CLEAR_LUA}
+    {"json_clear", &LuaScriptManager::JSON_CLEAR_LUA},
+    {"json_arrindex", &LuaScriptManager::JSON_ARRINDEX_LUA}
     // Add any other scripts here if they are defined as static const std::string members
 };
+
+const std::string LuaScriptManager::JSON_ARRINDEX_LUA = LUA_COMMON_HELPERS + R"lua(
+-- Script for JSON.ARRINDEX (emulated)
+-- KEYS[1] - The key where the JSON document is stored
+-- ARGV[1] - The path to the array within the JSON document.
+-- ARGV[2] - The JSON scalar value to search for.
+-- ARGV[3] - Optional start index (0-based, string). Defaults to 0.
+-- ARGV[4] - Optional end index (0-based, string, inclusive). Defaults to end of array. Can be negative.
+
+local key = KEYS[1]
+local path_str = ARGV[1]
+local value_to_find_json_str = ARGV[2]
+local start_index_str = ARGV[3]
+local end_index_str = ARGV[4]
+
+-- Get the JSON string from Redis
+local current_json_str = redis.call('GET', key)
+if not current_json_str then
+    return redis.error_reply('ERR_NOKEY Key ' .. key .. ' does not exist')
+end
+
+-- Decode the JSON string
+local current_doc, err_decode = cjson.decode(current_json_str)
+if not current_doc then
+    return redis.error_reply('ERR_DECODE Failed to decode JSON for key ' .. key .. ': ' .. (err_decode or 'unknown error'))
+end
+
+-- Get the target array
+local target_array_ref = current_doc
+if path_str ~= '$' and path_str ~= '' then
+    local path_segments = parse_path(path_str)
+    if path_segments == nil or (type(path_segments) == 'table' and path_segments.err) then
+         return redis.error_reply('ERR_PATH Invalid path string: ' .. path_str .. (path_segments.err or ''))
+    end
+    if #path_segments > 0 then
+        target_array_ref = get_value_at_path(current_doc, path_segments)
+    end
+end
+
+if target_array_ref == nil then
+    return redis.error_reply('ERR_NOPATH Path ' .. path_str .. ' does not exist or is null')
+end
+
+if type(target_array_ref) ~= 'table' then
+    return redis.error_reply('ERR_NOT_ARRAY Path ' .. path_str .. ' does not point to an array (type: ' .. type(target_array_ref) .. ')')
+end
+
+-- Validate if it's actually array-like.
+-- cjson decodes JSON arrays to Lua tables with sequential integer keys 1..N.
+-- A simple check: iterate keys, if any non-numeric or non-sequential, it's not a dense array.
+local is_dense_array = true
+local array_len = 0
+if next(target_array_ref) == nil then -- Empty table is an empty array
+    array_len = 0
+else
+    local temp_len = 0
+    for k, _ in pairs(target_array_ref) do
+        temp_len = temp_len + 1
+        if type(k) ~= 'number' or k < 1 or k > temp_len then -- Check for non-numeric or non-sequential keys
+            -- This check is basic. #target_array_ref is more reliable for cjson decoded arrays.
+        end
+    end
+    array_len = #target_array_ref -- Use Lua's length operator for sequence part.
+    if array_len ~= temp_len and temp_len > 0 then -- If #target_array_ref doesn't match total elements, it might be sparse or object-like.
+        -- However, for cjson output of a JSON array, #target_array_ref should be correct.
+        -- If it's an object that happens to have numeric keys, this check might be tricky.
+        -- Let's rely on #target_array_ref for length and type check above.
+        -- For this emulation, we assume target_array_ref is a proper Lua sequence if it's a JSON array.
+    end
+end
+
+
+-- Decode the value to search for
+local value_to_find, err_find_val = cjson.decode(value_to_find_json_str)
+if err_find_val then -- cjson.decode returns nil, error_message on failure
+    return redis.error_reply('ERR_DECODE_ARG_VALUE Failed to decode search value JSON: ' .. err_find_val)
+end
+-- Note: cjson.decode('null') correctly returns cjson.null.
+-- cjson.decode('true') returns true, cjson.decode('123') returns 123.
+
+-- Determine search range (Lua 1-based indices)
+local start_idx_lua = 1
+local end_idx_lua = array_len
+
+if start_index_str and start_index_str ~= '' then
+    local start_idx_client = tonumber(start_index_str)
+    if start_idx_client == nil then return redis.error_reply('ERR_INDEX_ARG Invalid start index: not a number') end
+    if start_idx_client < 0 then
+        start_idx_lua = array_len + start_idx_client + 1
+    else
+        start_idx_lua = start_idx_client + 1 -- Convert 0-based client to 1-based Lua
+    end
+    if start_idx_lua < 1 then start_idx_lua = 1 end -- Clamp
+end
+
+if end_index_str and end_index_str ~= '' then
+    local end_idx_client = tonumber(end_index_str)
+    if end_idx_client == nil then return redis.error_reply('ERR_INDEX_ARG Invalid end index: not a number') end
+    if end_idx_client < 0 then
+        end_idx_lua = array_len + end_idx_client + 1
+    else
+        end_idx_lua = end_idx_client + 1 -- Convert 0-based client to 1-based Lua
+    end
+    if end_idx_lua > array_len then end_idx_lua = array_len end -- Clamp
+end
+
+-- If array is empty or effective start is after effective end, no match possible.
+if array_len == 0 or start_idx_lua > end_idx_lua then
+    return -1
+end
+
+-- Iterate and find the value
+for i = start_idx_lua, end_idx_lua do
+    local current_element = target_array_ref[i]
+    -- Comparison:
+    -- For cjson.null, direct `==` works with other cjson.null.
+    -- For numbers, strings, booleans, direct `==` works.
+    -- Lua tables (representing JSON objects/arrays) are compared by reference with `==`.
+    -- JSON.ARRINDEX is typically for scalar values. If value_to_find is a table, this simple `==` will likely not work as intended for value equality.
+    -- For this implementation, we focus on scalar comparison.
+    if current_element == value_to_find then
+        return i - 1 -- Return 0-based client index
+    end
+end
+
+return -1 -- Not found
+)lua";
 
 const std::string LuaScriptManager::JSON_CLEAR_LUA = LUA_COMMON_HELPERS + R"lua(
 -- Refined JSON_CLEAR_LUA (Attempt 3 to fix test failures)
