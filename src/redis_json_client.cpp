@@ -736,6 +736,125 @@ size_t RedisJSONClient::array_length(const std::string& key, const std::string& 
     }
 }
 
+long long RedisJSONClient::arrinsert(const std::string& key, const std::string& path_str, int index, const std::vector<json>& values) {
+    if (values.empty()) {
+        throw ArgumentInvalidException("Values vector cannot be empty for arrinsert.");
+    }
+    if (_is_swss_mode) {
+        // Client-side get-modify-set
+        SetOptions opts;
+        json doc = _get_document_for_modification(key); // Creates {} if key not found
+        try {
+            // _json_modifier would need an arrinsert method
+            // For now, manually implement the logic or assume _json_modifier has it.
+            // This is a placeholder, actual implementation would involve more complex logic in JSONModifier
+            // or here directly using nlohmann::json capabilities.
+            // _json_modifier->array_insert(doc, _path_parser->parse(path_str), index, values);
+            // Let's simulate a simplified version of this logic here for now if modifier is not ready
+            json* target_array = nullptr;
+            auto parsed_path_elements = _path_parser->parse(path_str);
+
+            json* current = &doc;
+            bool path_is_root = (path_str == "$" || path_str == "" || parsed_path_elements.empty());
+
+            if (!path_is_root) {
+                for (size_t i = 0; i < parsed_path_elements.size(); ++i) {
+                    const auto& element = parsed_path_elements[i];
+                    if (element.type == PathParser::PathElement::Type::KEY) {
+                        if (!current->is_object()) throw PathNotFoundException(key, path_str); // Intermediate path not an object
+                        // Ensure key exists before dereferencing, or handle creation if necessary.
+                        // For arrinsert, path must exist up to the array.
+                        if (!current->contains(element.key_name)) throw PathNotFoundException(key, path_str);
+                        current = &(*current)[element.key_name];
+                    } else if (element.type == PathParser::PathElement::Type::INDEX) {
+                        if (!current->is_array()) throw PathNotFoundException(key, path_str); // Intermediate path not an array
+                        if (element.index < 0 || static_cast<size_t>(element.index) >= current->size()) throw PathNotFoundException(key, path_str); // Index out of bounds
+                        current = &(*current)[element.index];
+                    } else {
+                        // Other path element types (SLICE, WILDCARD etc.) are not straightforward for direct modification path.
+                        // This simplified client-side arrinsert might only support KEY/INDEX paths.
+                        throw InvalidPathException("SWSS arrinsert currently only supports KEY and INDEX path elements. Path: " + path_str);
+                    }
+                    if (current->is_null() && i < parsed_path_elements.size() -1) { // Intermediate path element is null
+                        throw PathNotFoundException(key, path_str);
+                    }
+                }
+            }
+            target_array = current;
+
+
+            if (!target_array->is_array()) {
+                 // If path is root and root is not an array, and we are trying to insert,
+                 // this should be an error unless the root is empty and becomes an array.
+                 // For simplicity, if not an array, throw.
+                if (target_array->is_null() && path_is_root) { // Key did not exist, root path
+                    *target_array = json::array(); // Initialize as empty array
+                } else if (target_array->is_null()) { // Path resolved to null, try to make it an array
+                     // This implies create_path=true. If path was "a.b" and "a" existed but "b" was null
+                     // We would need to make "b" an array. This is complex.
+                     // For arrinsert, the array must exist.
+                    throw TypeMismatchException(path_str, "array", "null");
+                }
+                else {
+                    throw TypeMismatchException(path_str, "array", target_array->type_name());
+                }
+            }
+
+            // nlohmann::json array iterators are complex for insert.
+            // Easier to convert to std::vector, insert, then convert back, or use direct element access + erase/insert.
+            // For simplicity and nlohmann specific:
+            // Convert 0-based client index to iterator position
+            auto it = target_array->begin();
+            int arr_len = target_array->size();
+            int insert_pos = index;
+
+            if (insert_pos < 0) { // Negative index
+                insert_pos = arr_len + insert_pos;
+            }
+            // Clamp insert_pos to [0, arr_len]
+            if (insert_pos < 0) insert_pos = 0;
+            if (insert_pos > arr_len) insert_pos = arr_len;
+
+            std::advance(it, insert_pos);
+
+            // Insert elements one by one
+            for (const auto& val_to_insert : values) {
+                it = target_array->insert(it, val_to_insert); // insert returns iterator to inserted element
+                std::advance(it, 1); // Advance iterator to insert next element after the current one
+            }
+
+            _set_document_after_modification(key, doc, opts);
+            return target_array->size();
+        } catch (const TypeMismatchException& e){
+            throw;
+        } catch (const PathNotFoundException& e){
+            throw;
+        } catch (const json::exception& e) {
+            throw RedisCommandException("ARRINSERT (SWSS-Client)", "Key: " + key + ", Path: " + path_str + ", JSON mod error: " + e.what());
+        }
+    } else { // Legacy Lua script
+        if (!_lua_script_manager) throw RedisJSONException("LuaScriptManager not initialized.");
+
+        std::vector<std::string> script_args;
+        script_args.push_back(path_str);
+        script_args.push_back(std::to_string(index));
+        for(const auto& val : values) {
+            script_args.push_back(val.dump());
+        }
+
+        try {
+            json result = _lua_script_manager->execute_script("json_array_insert", {key}, script_args);
+            if (result.is_number_integer()) {
+                return result.get<long long>();
+            }
+            throw RedisCommandException("LUA_json_array_insert", "Unexpected result type: " + result.dump());
+        } catch (const LuaScriptException& e) {
+            throw RedisCommandException("LUA_json_array_insert", "Key: " + key + ", Path: " + path_str + ", Error: " + e.what());
+        }
+    }
+}
+
+
 // --- Merge Operations ---
 // Simplified merge_json for SWSS mode to be client-side.
 // The original merge_json used JSON.MERGE which is specific to RedisJSON module.

@@ -199,8 +199,94 @@ void run_array_operations(redisjson::RedisJSONClient& client) {
     client.del_json(list_key);
 }
 
+void run_arrinsert_operations(redisjson::RedisJSONClient& client) {
+    print_header("Array Insert Operations (JSON.ARRINSERT)");
+    std::string arr_key = "sample:arrinsert:demo";
+
+    // Initial setup
+    json initial_array = {"a", "b", "e", "f"};
+    client.set_json(arr_key, initial_array);
+    std::cout << "Initial array: " << client.get_json(arr_key).dump() << std::endl;
+
+    // 1. Insert single element at index 2 ("c")
+    try {
+        long long new_len = client.arrinsert(arr_key, "$", 2, {json("c")});
+        std::cout << "SUCCESS: Inserted 'c' at index 2. New length: " << new_len << std::endl;
+        std::cout << "Array after insert: " << client.get_json(arr_key).dump() << std::endl; // Expected: ["a", "b", "c", "e", "f"]
+    } catch (const redisjson::RedisJSONException& e) {
+        std::cerr << "ERROR inserting 'c': " << e.what() << std::endl;
+    }
+
+    // 2. Insert multiple elements at index 3 ("d1", "d2")
+    try {
+        long long new_len = client.arrinsert(arr_key, "$", 3, {json("d1"), json("d2")});
+        std::cout << "\nSUCCESS: Inserted 'd1', 'd2' at index 3. New length: " << new_len << std::endl;
+        std::cout << "Array after multi-insert: " << client.get_json(arr_key).dump() << std::endl; // Expected: ["a", "b", "c", "d1", "d2", "e", "f"]
+    } catch (const redisjson::RedisJSONException& e) {
+        std::cerr << "ERROR inserting 'd1', 'd2': " << e.what() << std::endl;
+    }
+
+    // 3. Insert at the beginning (index 0)
+    client.set_json(arr_key, {"middle"}); // Reset
+    try {
+        long long new_len = client.arrinsert(arr_key, "$", 0, {"first"});
+        std::cout << "\nSUCCESS: Inserted 'first' at index 0. New length: " << new_len << std::endl;
+        std::cout << "Array after insert at 0: " << client.get_json(arr_key).dump() << std::endl; // Expected: ["first", "middle"]
+    } catch (const redisjson::RedisJSONException& e) {
+        std::cerr << "ERROR inserting at index 0: " << e.what() << std::endl;
+    }
+
+    // 4. Insert at the end (index > length)
+    client.set_json(arr_key, {"item1"}); // Reset
+    try {
+        long long new_len = client.arrinsert(arr_key, "$", 5, {"item_last"}); // Index 5 on array of len 1
+        std::cout << "\nSUCCESS: Inserted 'item_last' at index 5 (out of bounds). New length: " << new_len << std::endl;
+        std::cout << "Array after insert at end: " << client.get_json(arr_key).dump() << std::endl; // Expected: ["item1", "item_last"]
+    } catch (const redisjson::RedisJSONException& e) {
+        std::cerr << "ERROR inserting at end (index 5): " << e.what() << std::endl;
+    }
+
+    // 5. Insert using negative index (-1, before last element)
+    client.set_json(arr_key, {"x", "y", "z"}); // Reset
+    try {
+        long long new_len = client.arrinsert(arr_key, "$", -1, {"inserted_before_last"});
+        std::cout << "\nSUCCESS: Inserted 'inserted_before_last' at index -1. New length: " << new_len << std::endl;
+        std::cout << "Array after insert at -1: " << client.get_json(arr_key).dump() << std::endl; // Expected: ["x", "y", "inserted_before_last", "z"]
+    } catch (const redisjson::RedisJSONException& e) {
+        std::cerr << "ERROR inserting at index -1: " << e.what() << std::endl;
+    }
+
+    // 6. Insert into an empty array
+    client.del_json(arr_key); // Ensure it's gone or make it empty
+    client.set_json(arr_key, json::array());
+    try {
+        long long new_len = client.arrinsert(arr_key, "$", 0, {"only_item"});
+        std::cout << "\nSUCCESS: Inserted 'only_item' into empty array at index 0. New length: " << new_len << std::endl;
+        std::cout << "Array after insert into empty: " << client.get_json(arr_key).dump() << std::endl; // Expected: ["only_item"]
+    } catch (const redisjson::RedisJSONException& e) {
+        std::cerr << "ERROR inserting into empty array: " << e.what() << std::endl;
+    }
+
+    // 7. Insert into a nested array
+    json nested_doc = { {"data", { {"list", {"elem1", "elem3"} }} } };
+    client.set_json(arr_key, nested_doc);
+    try {
+        long long new_len = client.arrinsert(arr_key, "data.list", 1, {"elem2"});
+        std::cout << "\nSUCCESS: Inserted 'elem2' into nested array 'data.list' at index 1. New length: " << new_len << std::endl;
+        std::cout << "Document after insert into nested array: " << client.get_json(arr_key).dump(2) << std::endl;
+        // Expected: {"data": {"list": ["elem1", "elem2", "elem3"]}}
+    } catch (const redisjson::RedisJSONException& e) {
+        std::cerr << "ERROR inserting into nested array: " << e.what() << std::endl;
+    }
+
+
+    // Cleanup
+    client.del_json(arr_key);
+}
+
+
 void run_array_operations_extended(redisjson::RedisJSONClient& client) {
-    print_header("Array Operations (Extended)");
+    print_header("Array Operations (Extended - Pop, Length, Get Path)");
     std::string list_key = "sample:array:ext_items";
     json initial_data = {
         {"description", "A list of numbers"},
@@ -696,11 +782,12 @@ int main() {
         run_document_operations(legacy_client);
         run_path_operations(legacy_client);
         run_array_operations(legacy_client);
-        run_array_operations_extended(legacy_client); // Added extended array operations
-        run_atomic_operations(legacy_client); // Original atomic operations using Lua
-        run_sparse_merge_operations(legacy_client); // <--- Added new demo
-        run_object_operations(legacy_client); // <--- Added new demo for OBJKEYS
-        run_numeric_operations(legacy_client); // <--- Added new demo for NUMINCRBY
+        run_arrinsert_operations(legacy_client); // <--- Added new demo for ARRINSERT
+        run_array_operations_extended(legacy_client);
+        run_atomic_operations(legacy_client);
+        run_sparse_merge_operations(legacy_client);
+        run_object_operations(legacy_client);
+        run_numeric_operations(legacy_client);
 
         print_header("Non-SWSS (Legacy) Mode Sample Program Finished");
 
