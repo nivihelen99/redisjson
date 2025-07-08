@@ -760,13 +760,20 @@ long long RedisJSONClient::arrinsert(const std::string& key, const std::string& 
             if (!path_is_root) {
                 for (size_t i = 0; i < parsed_path_elements.size(); ++i) {
                     const auto& element = parsed_path_elements[i];
-                    if (element.is_key()) {
+                    if (element.type == PathParser::PathElement::Type::KEY) {
                         if (!current->is_object()) throw PathNotFoundException(key, path_str); // Intermediate path not an object
-                        current = &(*current)[element.key()];
-                    } else { // index
+                        // Ensure key exists before dereferencing, or handle creation if necessary.
+                        // For arrinsert, path must exist up to the array.
+                        if (!current->contains(element.key_name)) throw PathNotFoundException(key, path_str);
+                        current = &(*current)[element.key_name];
+                    } else if (element.type == PathParser::PathElement::Type::INDEX) {
                         if (!current->is_array()) throw PathNotFoundException(key, path_str); // Intermediate path not an array
-                        if (element.index() >= current->size()) throw PathNotFoundException(key, path_str); // Index out of bounds
-                        current = &(*current)[element.index()];
+                        if (element.index < 0 || static_cast<size_t>(element.index) >= current->size()) throw PathNotFoundException(key, path_str); // Index out of bounds
+                        current = &(*current)[element.index];
+                    } else {
+                        // Other path element types (SLICE, WILDCARD etc.) are not straightforward for direct modification path.
+                        // This simplified client-side arrinsert might only support KEY/INDEX paths.
+                        throw InvalidPathException("SWSS arrinsert currently only supports KEY and INDEX path elements. Path: " + path_str);
                     }
                     if (current->is_null() && i < parsed_path_elements.size() -1) { // Intermediate path element is null
                         throw PathNotFoundException(key, path_str);
@@ -810,9 +817,11 @@ long long RedisJSONClient::arrinsert(const std::string& key, const std::string& 
 
             std::advance(it, insert_pos);
 
-            // nlohmann json::insert(iterator, first, last) or insert(iterator, count, value) or insert(iterator, initializer_list)
-            // For multiple values:
-            target_array->insert(it, values.begin(), values.end());
+            // Insert elements one by one
+            for (const auto& val_to_insert : values) {
+                it = target_array->insert(it, val_to_insert); // insert returns iterator to inserted element
+                std::advance(it, 1); // Advance iterator to insert next element after the current one
+            }
 
             _set_document_after_modification(key, doc, opts);
             return target_array->size();
