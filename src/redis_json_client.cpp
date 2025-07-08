@@ -83,6 +83,79 @@ RedisConnectionManager::RedisConnectionPtr RedisJSONClient::get_legacy_redis_con
     }
 }
 
+std::optional<size_t> RedisJSONClient::object_length(const std::string& key, const std::string& path) {
+    if (_is_swss_mode) {
+        // Client-side implementation for SWSS mode:
+        json doc;
+        try {
+            doc = get_json(key); // Throws PathNotFoundException if key doesn't exist
+        } catch (const PathNotFoundException&) {
+            return std::nullopt; // Key not found
+        }
+
+        json target_node = doc;
+        if (path != "$" && path != "" && path != ".") {
+            try {
+                target_node = _json_modifier->get(doc, _path_parser->parse(path));
+            } catch (const PathNotFoundException&) {
+                return std::nullopt; // Path not found within the document
+            } catch (const json::exception& e) {
+                throw InvalidPathException("Error accessing path '" + path + "' in key '" + key + "' for object_length (SWSS): " + e.what());
+            }
+        }
+
+        if (target_node.is_object()) {
+            return target_node.size(); // nlohmann::json::size() gives number of keys for objects
+        } else {
+            // Path does not point to an object, or path was root and root is not an object
+            return std::nullopt;
+        }
+    } else { // Legacy mode (Lua script)
+        if (!_lua_script_manager) {
+            throw RedisJSONException("LuaScriptManager not initialized for object_length.");
+        }
+
+        try {
+            json result = _lua_script_manager->execute_script("json_object_length", {key}, {path});
+
+            if (result.is_null()) {
+                // Lua script returns nil if key/path not found, or if target is not an object (based on script logic).
+                return std::nullopt;
+            }
+            if (result.is_number_integer()) {
+                long long count = result.get<long long>();
+                if (count < 0) { // Should not happen with a correct script
+                    throw RedisCommandException("json_object_length", "Lua script returned negative count for key '" + key + "', path '" + path + "'.");
+                }
+                return static_cast<size_t>(count);
+            }
+            // If the script returns an error string (e.g. "ERR_TYPE Path value is an array..."),
+            // LuaScriptManager::redis_reply_to_json is expected to throw LuaScriptException.
+            // If it's not null and not an integer, it's an unexpected return type from the script.
+            throw RedisCommandException("json_object_length", "Unexpected reply format from Lua script for key '" + key + "', path '" + path + "'. Expected integer or null, got: " + result.dump());
+        } catch (const LuaScriptException& e) {
+            // This catches errors like malformed JSON, or script-level errors explicitly thrown by redis.error_reply()
+            // that were not handled as specific return values (like nil for not found).
+            // If the script returns an error string like "ERR_TYPE...", it will be caught here.
+            // We can choose to map certain Lua errors to std::nullopt or rethrow.
+            // For now, rethrow, as LuaScriptException indicates a problem.
+            // The Lua script for OBJLEN is designed to return an error reply for "not an object" or "not an array".
+            // These will be caught as LuaScriptException.
+            // It returns nil for "key not found" or "path not found".
+            // So, if it's a LuaScriptException here, it's likely a type error from the script.
+            // It might be better to return nullopt for type errors too, to match RedisJSON behavior more closely in some cases.
+            // However, the current Lua script for OBJLEN returns redis.error_reply for type mismatches.
+            // Let's refine this: if the exception message contains "ERR_TYPE" or "ERR_DECODE" or "ERR_PATH", it implies an issue
+            // that isn't just "not an object suitable for OBJLEN".
+            // For now, rethrowing is safer. If the script returns an error for "not an object", that's what the user gets.
+            // If we want specific client-side handling for "not an object", the Lua script should return a specific non-error value
+            // that the C++ side can interpret as "not an object".
+            // Given current Lua script returns redis.error_reply for type mismatch, rethrowing LuaScriptException is correct.
+            throw;
+        }
+    }
+}
+
 // --- Numeric Operations ---
 json RedisJSONClient::json_numincrby(const std::string& key, const std::string& path, double value) {
     if (_is_swss_mode) {

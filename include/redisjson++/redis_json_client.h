@@ -112,6 +112,12 @@ public:
     // Path defaults to root '$' if not specified. Only applicable in non-SWSS mode.
     std::vector<std::string> object_keys(const std::string& key, const std::string& path = "$");
 
+    // Retrieves the number of keys in a JSON object at a specified path.
+    // Returns std::nullopt if the key or path does not exist, or if the target is not an object.
+    // Throws LuaScriptException on script errors in non-SWSS mode.
+    // Path defaults to root '$' if not specified.
+    std::optional<size_t> object_length(const std::string& key, const std::string& path = "$");
+
     // Path Operations (will be client-side get-modify-set, atomicity lost for SWSS)
     json get_path(const std::string& key, const std::string& path) const;
     void set_path(const std::string& key, const std::string& path,

@@ -118,6 +118,164 @@ TEST_F(LuaScriptManagerTest, ExecuteLoadedScript) {
 }
 
 
+// --- Tests for JSON_OBJECT_LENGTH_LUA ---
+class LuaScriptManagerObjLenTest : public LuaScriptManagerTest {
+protected:
+    std::string test_key_ = "luatest:objlen";
+
+    void SetUp() override {
+        LuaScriptManagerTest::SetUp(); // Call base SetUp
+        if (live_redis_available_) {
+            try {
+                // Ensure json_object_length script is loaded (preload_builtin_scripts does this)
+                script_manager_.preload_builtin_scripts();
+                ASSERT_TRUE(script_manager_.is_script_loaded("json_object_length"));
+
+                // Clean up the test key before each test
+                auto conn = conn_manager_.get_connection();
+                redisReply* reply = conn->command("DEL %s", test_key_.c_str());
+                if (reply) freeReplyObject(reply);
+
+            } catch (const std::exception& e) {
+                GTEST_SKIP() << "Skipping ObjLen tests, setup failed: " << e.what();
+            }
+        } else {
+            GTEST_SKIP() << "Skipping ObjLen tests, live Redis required.";
+        }
+    }
+
+    void TearDown() override {
+        if (live_redis_available_) {
+            try {
+                auto conn = conn_manager_.get_connection();
+                redisReply* reply = conn->command("DEL %s", test_key_.c_str());
+                 if (reply) freeReplyObject(reply);
+            } catch (...) { /* ignore cleanup errors */ }
+        }
+        LuaScriptManagerTest::TearDown();
+    }
+
+    // Helper to set initial JSON for testing
+    void set_initial_json(const json& doc) {
+        auto conn = conn_manager_.get_connection();
+        std::string doc_str = doc.dump();
+        redisReply* reply = conn->command("SET %s %s", test_key_.c_str(), doc_str.c_str());
+        ASSERT_NE(reply, nullptr) << "Failed to SET initial JSON for test. Context: " << (conn->get_context() ? conn->get_context()->errstr : "N/A");
+        ASSERT_EQ(reply->type, REDIS_REPLY_STATUS) << "SET command failed: " << (reply->str ? reply->str : "Unknown error");
+        ASSERT_STREQ(reply->str, "OK");
+        freeReplyObject(reply);
+    }
+};
+
+TEST_F(LuaScriptManagerObjLenTest, LengthOfRootObject) {
+    json initial_doc = {{"name", "John"}, {"age", 30}, {"city", "New York"}};
+    set_initial_json(initial_doc);
+
+    json result = script_manager_.execute_script("json_object_length", {test_key_}, {"$"});
+    ASSERT_TRUE(result.is_number_integer());
+    EXPECT_EQ(result.get<size_t>(), 3);
+}
+
+TEST_F(LuaScriptManagerObjLenTest, LengthOfNestedObject) {
+    json initial_doc = {
+        {"user", {{"name", "Jane"}, {"id", 101}}},
+        {"settings", {{"theme", "dark"}, {"notifications", true}}}
+    };
+    set_initial_json(initial_doc);
+
+    json result = script_manager_.execute_script("json_object_length", {test_key_}, {"settings"});
+    ASSERT_TRUE(result.is_number_integer());
+    EXPECT_EQ(result.get<size_t>(), 2);
+}
+
+TEST_F(LuaScriptManagerObjLenTest, LengthOfEmptyObject) {
+    json initial_doc = {{"empty_obj", json::object()}};
+    set_initial_json(initial_doc);
+
+    json result = script_manager_.execute_script("json_object_length", {test_key_}, {"empty_obj"});
+    ASSERT_TRUE(result.is_number_integer());
+    EXPECT_EQ(result.get<size_t>(), 0);
+}
+
+TEST_F(LuaScriptManagerObjLenTest, PathPointsToArray) {
+    json initial_doc = {{"my_array", {1, 2, 3}}};
+    set_initial_json(initial_doc);
+
+    EXPECT_THROW({
+        try {
+            script_manager_.execute_script("json_object_length", {test_key_}, {"my_array"});
+        } catch (const LuaScriptException& e) {
+            EXPECT_THAT(e.what(), ::testing::HasSubstr("ERR_TYPE"));
+            EXPECT_THAT(e.what(), ::testing::HasSubstr("Path value is an array"));
+            throw;
+        }
+    }, LuaScriptException);
+}
+
+TEST_F(LuaScriptManagerObjLenTest, PathPointsToScalar) {
+    json initial_doc = {{"my_string", "hello"}};
+    set_initial_json(initial_doc);
+
+    EXPECT_THROW({
+        try {
+            script_manager_.execute_script("json_object_length", {test_key_}, {"my_string"});
+        } catch (const LuaScriptException& e) {
+            EXPECT_THAT(e.what(), ::testing::HasSubstr("ERR_TYPE"));
+            EXPECT_THAT(e.what(), ::testing::HasSubstr("not an object or array")); // Lua script's error message
+            throw;
+        }
+    }, LuaScriptException);
+}
+
+TEST_F(LuaScriptManagerObjLenTest, PathNotFound) {
+    json initial_doc = {{"user", {{"name", "Jane"}}}};
+    set_initial_json(initial_doc);
+
+    json result = script_manager_.execute_script("json_object_length", {test_key_}, {"user.nonexistent"});
+    EXPECT_TRUE(result.is_null()); // Lua script returns nil for path not found
+}
+
+TEST_F(LuaScriptManagerObjLenTest, KeyNotFound) {
+    // test_key_ is guaranteed to be clean by SetUp
+    json result = script_manager_.execute_script("json_object_length", {test_key_}, {"$"});
+    EXPECT_TRUE(result.is_null()); // Lua script returns nil for key not found
+}
+
+TEST_F(LuaScriptManagerObjLenTest, MalformedJsonDocument) {
+    // Manually set a non-JSON string in Redis
+    auto conn = conn_manager_.get_connection();
+    redisReply* reply_set = conn->command("SET %s %s", test_key_.c_str(), "this is not json");
+    ASSERT_NE(reply_set, nullptr);
+    ASSERT_STREQ(reply_set->str, "OK");
+    freeReplyObject(reply_set);
+
+    EXPECT_THROW({
+        try {
+            script_manager_.execute_script("json_object_length", {test_key_}, {"$"});
+        } catch (const LuaScriptException& e) {
+            // cjson.decode might raise a direct Lua error (e.g., "Expected value but found invalid token")
+            // or it might return an error string that our script wraps with "ERR_DECODE".
+            // We need to be flexible here.
+            EXPECT_THAT(e.what(), ::testing::MatchesRegex(".*(decode JSON|invalid token|ERR_DECODE|lexical error|parse error).*"));
+            throw;
+        }
+    }, LuaScriptException);
+}
+
+TEST_F(LuaScriptManagerObjLenTest, PathIsInvalid) {
+    json initial_doc = {{"value", 10}};
+    set_initial_json(initial_doc);
+     EXPECT_THROW({
+        try {
+            script_manager_.execute_script("json_object_length", {test_key_}, {"user..name"}); // Invalid path with double dots
+        } catch (const LuaScriptException& e) {
+            EXPECT_THAT(e.what(), ::testing::HasSubstr("ERR_PATH Invalid path string"));
+            throw;
+        }
+    }, LuaScriptException);
+}
+
+
 TEST_F(LuaScriptManagerTest, ExecuteNonExistentScriptLocal) {
     // No live Redis needed as it should fail on local cache check
     EXPECT_THROW(script_manager_.execute_script("nonexistent_local", {}, {}), LuaScriptException);
