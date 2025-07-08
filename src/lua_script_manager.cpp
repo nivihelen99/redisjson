@@ -216,63 +216,89 @@ local function replace_empty_arrays_with_sentinel_recursive(doc_table)
         return
     end
 
-    -- Determine if current doc_table is an array or object to guide iteration
-    local is_array_heuristic = true
-    local n = 0
-    if next(doc_table) == nil then -- Empty table, could be {} or []
-        -- If it has __array metatable true, it's an array. Otherwise, could be object.
-        -- For our purpose, if it's empty, it will be replaced if it's supposed to be an array.
-        -- The caller (JSON_CLEAR or JSON_ARRAY_TRIM) should ensure it's marked if it's an array.
+    -- For the current table itself, if it's empty, check its metatable.
+    -- This case is mostly for when this function is called on a potentially empty root document.
+    if next(doc_table) == nil then
+        local mt_root = getmetatable(doc_table)
+        if not (mt_root and mt_root.__array) then
+            -- If it's an empty table but NOT explicitly an array, don't process for sentinel.
+            -- It will be encoded as {} by cjson, which is correct for an empty object.
+            -- No further recursion needed as it's empty.
+            return
+        end
+        -- If it IS an empty array (metatable __array=true), it will be handled by the caller
+        -- which might replace the reference to doc_table with EMPTY_ARRAY_SENTINEL.
+        -- This function's role is more about *contained* tables.
+        -- However, the logic below will iterate its keys/indices (none, if empty).
+    end
+
+    local keys_to_process = {}
+    local is_array_like = true -- Assume array unless proven otherwise for key gathering
+    if next(doc_table) == nil then
+        is_array_like = false -- No keys/indices to process
     else
-        for k, v_val in pairs(doc_table) do
-            n = n + 1
-            if type(k) ~= 'number' or k < 1 or k > n then -- Basic check
-                is_array_heuristic = false
+        for k_check in pairs(doc_table) do
+            if type(k_check) ~= 'number' then
+                is_array_like = false
                 break
             end
         end
-        if is_array_heuristic and #doc_table ~= n then -- Check for sparseness
-            is_array_heuristic = false
-        end
     end
 
-    if is_array_heuristic then -- Iterate as an array (or potential array)
-        for i = 1, #doc_table do
+    if is_array_like then
+        -- Process numerically indexed items (potential array elements)
+        -- Using ipairs for dense arrays, but need to handle sparse arrays converted to objects.
+        -- The original loop `for i = 1, #doc_table do` is better for actual Lua arrays.
+        -- Let's refine to iterate based on actual keys present.
+        local max_idx = 0
+        for k in pairs(doc_table) do
+           if type(k) == 'number' and k > max_idx then max_idx = k end
+        end
+        for i = 1, max_idx do -- Iterate up to max numeric index found
             local value = doc_table[i]
-            if type(value) == 'table' then
-                local mt = getmetatable(value)
-                if mt and mt.__array and #value == 0 and next(value) == nil then
-                    doc_table[i] = EMPTY_ARRAY_SENTINEL
+            if value ~= nil and type(value) == 'table' then
+                if next(value) == nil then -- Value is an empty table
+                    local mt_val = getmetatable(value)
+                    if mt_val and mt_val.__array then
+                        doc_table[i] = EMPTY_ARRAY_SENTINEL
+                    end
+                    -- If empty table but not __array, it's an empty object, leave as is.
                 else
                     replace_empty_arrays_with_sentinel_recursive(value)
-                    -- After recursion, check again if it became an empty array
-                    if type(doc_table[i]) == 'table' then -- Check if it wasn't replaced by sentinel in recursive call
-                        local mt_after = getmetatable(doc_table[i])
-                        if mt_after and mt_after.__array and #doc_table[i] == 0 and next(doc_table[i]) == nil then
-                             doc_table[i] = EMPTY_ARRAY_SENTINEL
+                    -- After recursion, if value itself became an empty array (e.g. cleared deeper)
+                    -- this check is a bit redundant if the recursive call handles its own root.
+                    -- However, if `value` was modified by recursion to become an empty array sentinel,
+                    -- then `doc_table[i]` would already be the sentinel.
+                    -- If `value` was modified to become an empty table that *is* an array, re-check.
+                    if type(doc_table[i]) == 'table' and next(doc_table[i]) == nil then
+                        local mt_after_recur = getmetatable(doc_table[i])
+                        if mt_after_recur and mt_after_recur.__array then
+                            doc_table[i] = EMPTY_ARRAY_SENTINEL
                         end
                     end
                 end
             end
         end
-    else -- Iterate as an object
-        local keys_to_iterate = {}
-        for k_obj, _ in pairs(doc_table) do table.insert(keys_to_iterate, k_obj) end
+    end
 
-        for _, key in ipairs(keys_to_iterate) do
-            local value = doc_table[key]
+    -- Process string keys (object properties) or non-sequential numeric keys
+    -- This ensures all table types are iterated, not just dense arrays.
+    for key, value in pairs(doc_table) do
+        if type(key) == 'string' or (type(key) == 'number' and not is_array_like) then -- Process if string key or if not a dense array
             if type(value) == 'table' then
-                local mt = getmetatable(value)
-                if mt and mt.__array and #value == 0 and next(value) == nil then
-                    doc_table[key] = EMPTY_ARRAY_SENTINEL
+                if next(value) == nil then -- Value is an empty table
+                    local mt_val = getmetatable(value)
+                    if mt_val and mt_val.__array then
+                        doc_table[key] = EMPTY_ARRAY_SENTINEL
+                    end
+                    -- If empty table but not __array, it's an empty object, leave as is.
                 else
                     replace_empty_arrays_with_sentinel_recursive(value)
-                     -- After recursion, check again if it became an empty array
-                    if type(doc_table[key]) == 'table' then
-                        local mt_after = getmetatable(doc_table[key])
-                        if mt_after and mt_after.__array and #doc_table[key] == 0 and next(doc_table[key]) == nil then
-                            doc_table[key] = EMPTY_ARRAY_SENTINEL
-                        end
+                    if type(doc_table[key]) == 'table' and next(doc_table[key]) == nil then
+                         local mt_after_recur = getmetatable(doc_table[key])
+                         if mt_after_recur and mt_after_recur.__array then
+                             doc_table[key] = EMPTY_ARRAY_SENTINEL
+                         end
                     end
                 end
             end
@@ -1277,8 +1303,11 @@ local function do_clear_recursive(target_value, is_target_array_hint)
                 if sub_modified then item_modified_this_iteration = true; end
 
                 -- If v is an array and is empty (either became empty or started empty), ensure metatable.
-                if sub_is_array_hint and #v == 0 then
-                    setmetatable(v, { __array = true })
+                if sub_is_array_hint and next(v) == nil then -- Check if truly empty
+                    local mt_v = getmetatable(v)
+                    if not mt_v or mt_v.__array ~= true then
+                         setmetatable(v, { __array = true })
+                    end
                 end
             end
             if item_modified_this_iteration then
@@ -1289,8 +1318,16 @@ local function do_clear_recursive(target_value, is_target_array_hint)
     -- For arrays handled at the current level of recursion:
     -- If it's an array and it's empty, ensure it has the __array metatable.
     -- This covers arrays that were emptied OR were already empty.
-    if is_array and #target_value == 0 then
-        setmetatable(target_value, { __array = true })
+    -- Only set __array = true if it was determined to be an array and is now empty.
+    -- An empty object should not get this metatable.
+    if is_array and next(target_value) == nil then -- Check if truly empty
+        -- Check if it already has a metatable; if so, preserve it if it's not for __array
+        -- Or, more simply, just ensure __array is true if it's meant to be an array.
+        -- The crucial part is that `is_array` must be a reliable determination.
+        local mt = getmetatable(target_value)
+        if not mt or mt.__array ~= true then -- Set or overwrite only if not already correctly set
+            setmetatable(target_value, { __array = true })
+        end
     end
     return count, actually_modified_structure
 end
@@ -1324,8 +1361,11 @@ if path_str == '$' or path_str == '' then
         end
         cleared_count, doc_modified_overall = do_clear_recursive(current_doc, root_is_array)
         -- If the root was an array and is now empty (or started empty and was processed), ensure metatable.
-        if root_is_array and (type(current_doc)=='table' and #current_doc == 0) then
-             setmetatable(current_doc, { __array = true })
+        if root_is_array and (type(current_doc)=='table' and next(current_doc) == nil) then -- Check if truly empty
+             local mt_root = getmetatable(current_doc)
+             if not mt_root or mt_root.__array ~= true then
+                setmetatable(current_doc, { __array = true })
+             end
         end
     else
          cleared_count = 0; doc_modified_overall = false;
@@ -1339,9 +1379,26 @@ else -- Path is not root
         -- Path resolved to root (e.g. if parse_path can return empty for root-like variants)
         -- Fallback to root processing logic.
         if type(current_doc) == 'table' then
-            local root_is_array_alt = nil; local n_root_keys_alt=0; if next(current_doc)==nil then root_is_array_alt=true; else for kr,_ in pairs(current_doc) do n_root_keys_alt=n_root_keys_alt+1; if type(kr)~='number' or kr<1 or kr>n_root_keys_alt then root_is_array_alt=false; break; end end; if root_is_array_alt==nil and #current_doc~=n_root_keys_alt then root_is_array_alt=false; end; if root_is_array_alt==nil then root_is_array_alt=true; end end
+            local root_is_array_alt = nil; local n_root_keys_alt=0;
+            if next(current_doc)==nil then
+                -- If root is an empty table, its type (array/object) depends on pre-existing metatable or context.
+                -- For JSON.CLEAR, if path is '$' and doc is `{}`, it should remain `{}`.
+                -- The `do_clear_recursive` will respect its `is_array_hint`.
+                -- Here, we need to correctly determine this initial hint for the root.
+                local mt = getmetatable(current_doc)
+                if mt and mt.__array then root_is_array_alt = true else root_is_array_alt = false end
+            else
+                for kr,_ in pairs(current_doc) do n_root_keys_alt=n_root_keys_alt+1; if type(kr)~='number' or kr<1 or kr>n_root_keys_alt then root_is_array_alt=false; break; end end;
+                if root_is_array_alt==nil and #current_doc~=n_root_keys_alt then root_is_array_alt=false; end;
+                if root_is_array_alt==nil then root_is_array_alt=true; end
+            end
             cleared_count, doc_modified_overall = do_clear_recursive(current_doc, root_is_array_alt)
-            if root_is_array_alt and #current_doc == 0 then setmetatable(current_doc, { __array = true }); end
+            if root_is_array_alt and next(current_doc) == nil then -- Check if truly empty
+                 local mt_root_alt = getmetatable(current_doc)
+                 if not mt_root_alt or mt_root_alt.__array ~= true then
+                    setmetatable(current_doc, { __array = true });
+                 end
+            end
         else cleared_count = 0; doc_modified_overall = false; end
     else
         -- Path is not root, and path_segments is not empty
@@ -1360,11 +1417,20 @@ else -- Path is not root
 
         local target_value = parent[final_segment]
         if type(target_value) == 'table' then
-            local target_is_array = nil; local n_target_keys=0; if next(target_value)==nil then target_is_array=true; else for kt,_ in pairs(target_value) do n_target_keys=n_target_keys+1; if type(kt)~='number' or kt<1 or kt>n_target_keys then target_is_array=false; break; end end; if target_is_array==nil and #target_value~=n_target_keys then target_is_array=false; end; if target_is_array==nil then target_is_array=true; end end
-            cleared_count, doc_modified_overall = do_clear_recursive(target_value, target_is_array)
+            local target_is_array_hint = nil; local n_target_keys=0;
+            if next(target_value)==nil then
+                local mt_target = getmetatable(target_value)
+                if mt_target and mt_target.__array then target_is_array_hint = true else target_is_array_hint = false end
+            else
+                 for kt,_ in pairs(target_value) do n_target_keys=n_target_keys+1; if type(kt)~='number' or kt<1 or kt>n_target_keys then target_is_array_hint=false; break; end end; if target_is_array_hint==nil and #target_value~=n_target_keys then target_is_array_hint=false; end; if target_is_array_hint==nil then target_is_array_hint=true; end
+            end
+            cleared_count, doc_modified_overall = do_clear_recursive(target_value, target_is_array_hint)
             -- If the cleared target was an array and is now empty (or started empty), ensure metatable.
-            if target_is_array and #target_value == 0 then
-                setmetatable(target_value, {__array = true}) 
+            if target_is_array_hint and next(target_value) == nil then -- Check if truly empty
+                local mt_target_after = getmetatable(target_value)
+                if not mt_target_after or mt_target_after.__array ~= true then
+                    setmetatable(target_value, {__array = true})
+                end
             end
         elseif type(target_value) == 'number' then
             parent[final_segment] = 0
