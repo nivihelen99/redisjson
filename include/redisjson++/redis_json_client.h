@@ -112,10 +112,10 @@ public:
     // Path defaults to root '$' if not specified. Only applicable in non-SWSS mode.
     std::vector<std::string> object_keys(const std::string& key, const std::string& path = "$");
 
-    // Path Operations (will be client-side get-modify-set, atomicity lost)
+    // Path Operations (will be client-side get-modify-set, atomicity lost for SWSS)
     json get_path(const std::string& key, const std::string& path) const;
     void set_path(const std::string& key, const std::string& path,
-                  const json& value, const SetOptions& opts = {}); // create_path in SetOptions might be used client-side
+                  const json& value, const SetOptions& opts = {});
     void del_path(const std::string& key, const std::string& path);
     bool exists_path(const std::string& key, const std::string& path) const;
 
@@ -137,6 +137,51 @@ public:
 
     // Atomic Operations (atomicity will be lost with client-side logic)
     // These will become get-then-set or get-compare-then-set
+    json non_atomic_get_set(const std::string& key, const std::string& path,
+                            const json& new_value);
+    bool non_atomic_compare_set(const std::string& key, const std::string& path,
+                                const json& expected, const json& new_value);
+
+    // Utility Operations
+    std::vector<std::string> keys_by_pattern(const std::string& pattern) const;
+    json search_by_value(const std::string& key, const json& search_value) const; // Stays client-side
+    std::vector<std::string> get_all_paths(const std::string& key) const; // Stays client-side
+
+    // Path Operations (will be client-side get-modify-set, atomicity lost)
+    json get_path(const std::string& key, const std::string& path) const;
+    void set_path(const std::string& key, const std::string& path,
+                  const json& value, const SetOptions& opts = {}); // create_path in SetOptions might be used client-side
+    void del_path(const std::string& key, const std::string& path);
+    bool exists_path(const std::string& key, const std::string& path) const;
+
+    // Numeric Operations
+    /**
+     * @brief Increments (or decrements) the numeric value stored at path by a specified amount.
+     * This operation is atomic when using Lua scripts in non-SWSS mode.
+     * In SWSS mode, this operation is non-atomic (get-modify-set).
+     * @param key The Redis key.
+     * @param path The JSON path to the numeric value.
+     * @param value The amount to increment by (can be negative for decrement).
+     * @return The new numeric value after the increment (as a nlohmann::json object).
+     * @throws RedisJSONException if the key does not exist, path does not exist,
+     *         value at path is not a number, or other script/command errors.
+     */
+    json json_numincrby(const std::string& key, const std::string& path, double value);
+
+    // Array Operations (will be client-side get-modify-set, atomicity lost for SWSS)
+    void append_path(const std::string& key, const std::string& path,
+                     const json& value);
+    void prepend_path(const std::string& key, const std::string& path,
+                      const json& value);
+    json pop_path(const std::string& key, const std::string& path,
+                  int index = -1);
+    size_t array_length(const std::string& key, const std::string& path) const;
+
+    // Merge Operations (client-side or specific command needed)
+    void merge_json(const std::string& key, const json& patch); // Simplified: deep merge by default client-side
+    void patch_json(const std::string& key, const json& patch_operations); // RFC 6902 JSON Patch, client-side
+
+    // Atomic Operations (atomicity will be lost with client-side logic for SWSS)
     json non_atomic_get_set(const std::string& key, const std::string& path,
                             const json& new_value);
     bool non_atomic_compare_set(const std::string& key, const std::string& path,

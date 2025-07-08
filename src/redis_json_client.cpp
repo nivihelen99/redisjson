@@ -83,6 +83,59 @@ RedisConnectionManager::RedisConnectionPtr RedisJSONClient::get_legacy_redis_con
     }
 }
 
+// --- Numeric Operations ---
+json RedisJSONClient::json_numincrby(const std::string& key, const std::string& path, double value) {
+    if (_is_swss_mode) {
+        // Non-atomic get-modify-set for SWSS mode
+        json doc = _get_document_for_modification(key); // Creates empty {} if key not found
+        json current_value_at_path = json(nullptr);
+        bool path_existed = true;
+        std::vector<PathSegment> parsed_path = _path_parser->parse(path);
+
+        try {
+            current_value_at_path = _json_modifier->get(doc, parsed_path);
+        } catch (const PathNotFoundException&) {
+            path_existed = false; // current_value_at_path remains null
+        }
+
+        if (!path_existed && !current_value_at_path.is_number()) { // Path must exist and be a number, or be creatable as number
+             // If path doesn't exist, we can't increment. RedisJSON errors if path doesn't exist.
+            throw PathNotFoundException(key, path);
+        }
+        if (path_existed && !current_value_at_path.is_number()) {
+            throw TypeMismatchException(path, "number", current_value_at_path.type_name());
+        }
+
+        double new_numeric_value = (path_existed ? current_value_at_path.get<double>() : 0.0) + value;
+
+        // nlohmann::json will store double. If it's an integer, it will be represented as such (e.g., 1.0 becomes 1)
+        json new_json_value = new_numeric_value;
+
+        SetOptions opts; // Default set options
+        // For NUMINCRBY, path should exist. create_path=false. Overwrite is true.
+        _json_modifier->set(doc, parsed_path, new_json_value, false /*create_path*/, true /*overwrite*/);
+        _set_document_after_modification(key, doc, opts);
+        return new_json_value;
+
+    } else { // Legacy mode (atomic via Lua)
+        if (!_lua_script_manager) throw RedisJSONException("LuaScriptManager not initialized.");
+        const std::string script_name = "json_numincrby";
+        std::vector<std::string> keys = {key};
+        // Convert double to string with sufficient precision. std::to_string might not be enough.
+        // Using nlohmann::json to dump the number ensures it's JSON-compatible.
+        std::vector<std::string> args = {path, json(value).dump()};
+        try {
+            // The Lua script is expected to return the new value, JSON encoded.
+            // LuaScriptManager::execute_script already parses this JSON string into a nlohmann::json object.
+            return _lua_script_manager->execute_script(script_name, keys, args);
+        } catch (const LuaScriptException& e) {
+            // Lua script itself might return specific errors like "ERR_NOKEY", "ERR_NOPATH", "ERR_TYPE"
+            // These are wrapped in LuaScriptException.
+            throw; // Re-throw the exception as it contains the specific error from script.
+        }
+    }
+}
+
 
 // --- Document Operations ---
 
